@@ -1146,7 +1146,8 @@ Suggested key bindings (add to your init file):
   (global-set-key (kbd \"C-c r L\") #\\='org-apple-reminders-create-list)
   ;; In org-mode buffers:
   (with-eval-after-load 'org
-    (define-key org-mode-map (kbd \"C-c r p\") #\\='org-apple-reminders-push-heading))"
+    (define-key org-mode-map (kbd \"C-c r p\") #\\='org-apple-reminders-push-heading)
+    (define-key org-mode-map (kbd \"C-c r D\") #\\='org-apple-reminders-delete-reminder))"
   (org-apple-reminders--ensure-agenda-files)
   (with-eval-after-load 'org-agenda
     (org-apple-reminders--ensure-agenda-files))

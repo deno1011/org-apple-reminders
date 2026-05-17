@@ -587,9 +587,11 @@ set (first sync of this entry).
 * Delete Reminder
 
 =org-apple-reminders-delete-reminder= removes a reminder from both Apple
-Reminders and the org sync file in one operation.  It works from both the
-=*Apple Reminders*= dashboard (press =d=) and directly in =reminders.org= when
-point is on a reminder heading.
+Reminders and the org sync file in one operation.  It works from:
+
+- The =*Apple Reminders*= dashboard — press =d=
+- Directly in =reminders.org= — press =C-c r D=
+- Anywhere via =M-x org-apple-reminders-delete-reminder=
 
 The function:
 1. Confirms with the user via =yes-or-no-p= to prevent accidental deletion.
@@ -1674,7 +1676,8 @@ Suggested key bindings (add to your init file):
   (global-set-key (kbd \"C-c r L\") #\\='org-apple-reminders-create-list)
   ;; In org-mode buffers:
   (with-eval-after-load 'org
-    (define-key org-mode-map (kbd \"C-c r p\") #\\='org-apple-reminders-push-heading))"
+    (define-key org-mode-map (kbd \"C-c r p\") #\\='org-apple-reminders-push-heading)
+    (define-key org-mode-map (kbd \"C-c r D\") #\\='org-apple-reminders-delete-reminder))"
   (org-apple-reminders--ensure-agenda-files)
   (with-eval-after-load 'org-agenda
     (org-apple-reminders--ensure-agenda-files))

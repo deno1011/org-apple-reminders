@@ -70,7 +70,8 @@ Add to your init file after `(org-apple-reminders-setup)`:
 (global-set-key (kbd "C-c r L") #'org-apple-reminders-create-list)
 
 (with-eval-after-load 'org
-  (define-key org-mode-map (kbd "C-c r p") #'org-apple-reminders-push-heading))
+  (define-key org-mode-map (kbd "C-c r p") #'org-apple-reminders-push-heading)
+  (define-key org-mode-map (kbd "C-c r D") #'org-apple-reminders-delete-reminder))
 ```
 
 ## Usage
@@ -93,6 +94,7 @@ Opens the `*Apple Reminders*` buffer showing all lists and items. Dashboard key 
 |---|---|
 | `g` | Refresh from Apple |
 | `t` / `C-c C-t` | Complete reminder at point |
+| `d` | Delete reminder from Apple and org |
 | `e` | Jump to heading in reminders.org |
 | `h` | Toggle visibility of completed items |
 | `q` | Quit window |
@@ -115,7 +117,8 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 | `org-apple-reminders-dashboard` | Open dashboard buffer |
 | `org-apple-reminders-dashboard-refresh` | Fetch fresh data and re-render |
 | `org-apple-reminders-add` | Add a new reminder interactively |
-| `org-apple-reminders-push-heading` | Push org heading at point to Apple |
+| `org-apple-reminders-push-heading` | Push org heading at point to Apple (`C-c r p` in org) |
+| `org-apple-reminders-delete-reminder` | Delete reminder from Apple and org (`d` in dashboard, `C-c r D` in org) |
 | `org-apple-reminders-show-lists` | List all Apple Reminders lists |
 | `org-apple-reminders-create-list` | Create a new Apple Reminders list |
 | `org-apple-reminders-migrate-flat-headings` | One-time migration from flat layout |
