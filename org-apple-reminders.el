@@ -653,7 +653,7 @@ Conflict resolution:
                                     (t 'remove))))
               (unless (equal a-due o-due)
                 (if a-due
-                    (org-add-planning-info 'deadline a-due)
+                    (org-add-planning-info 'deadline (org-apple-reminders--format-due a-due))
                   (org-add-planning-info nil nil 'deadline)))
               (unless (eq a-flagged o-flagged)
                 (org-toggle-tag "flagged" (if a-flagged 'on 'off)))
@@ -800,7 +800,7 @@ Conflict resolution:
                                                (t 'remove))))
                          (unless (equal a-due o-due)
                            (if a-due
-                               (org-add-planning-info 'deadline a-due)
+                               (org-add-planning-info 'deadline (org-apple-reminders--format-due a-due))
                              (org-add-planning-info nil nil 'deadline)))
                          (unless (eq a-flagged o-flagged)
                            (org-toggle-tag "flagged" (if a-flagged 'on 'off)))
