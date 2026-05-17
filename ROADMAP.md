@@ -17,6 +17,10 @@ _(nothing in active development)_
   org `<YYYY-MM-DD Dow HH:MM>` → Apple `HH:MM`. Date-only reminders are
   unaffected. ✓ Merged to `main` (v1.1).
 
+- **Selective list sync** — `org-apple-reminders-included-lists`: set to a
+  list of names to restrict which Apple lists are pulled into org. Items
+  already in the org file are always kept in sync. ✓ Merged to `main` (v1.2).
+
 ## Planned
 
 ### Reminder management
@@ -41,9 +45,7 @@ _(nothing in active development)_
   export/import), provide a command to match an existing org heading to an
   Apple reminder by title and re-stamp the ID.
 
-- **Selective list sync** — currently all lists are pulled but new items are
-  only created in `sync-list`. Plan: `org-apple-reminders-included-lists`
-  customisation to choose which lists participate in bidirectional sync.
+- **Selective list sync** — ✓ done (v1.2). See `org-apple-reminders-included-lists`.
 
 - **Conflict log** — when Apple wins a conflict, log the old org value and
   new Apple value to a `*org-apple-reminders conflicts*` buffer so the user

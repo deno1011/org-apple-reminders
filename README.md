@@ -57,6 +57,15 @@ Clone this repository and add it to your load path:
 | `org-apple-reminders-default-list` | `nil` (auto) | Fallback list for interactive commands |
 | `org-apple-reminders-auto-sync-interval` | `300` | Seconds between background pulls (0 = off) |
 | `org-apple-reminders-agenda-file` | `nil` | Optional separate read-only agenda file |
+| `org-apple-reminders-included-lists` | `nil` (all) | Lists to sync; nil means all lists |
+
+Set `org-apple-reminders-included-lists` to restrict which Apple Reminders lists are pulled into org:
+
+```emacs-lisp
+(setq org-apple-reminders-included-lists '("Work" "Personal"))
+```
+
+Items already in the org file are always kept in sync; the filter only prevents new Apple items from being pulled into org.
 
 ### Suggested key bindings
 

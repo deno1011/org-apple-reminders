@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Denis Butic
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
-;; Version: 1.1
+;; Version: 1.2
 ;; Package-Requires: ((emacs "27.1") (org "9.3") (cl-lib "0.5"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -19,8 +19,9 @@
 ;;   - Full bidirectional sync (org <-> Apple Reminders)
 ;;   - Conflict resolution via dual timestamps
 ;;     (REMINDER_APPLE_MOD vs REMINDER_ORG_MOD)
-;;   - Fields synced: title, due date, priority (A/B/C <-> 1/5/9),
+;;   - Fields synced: title, due date + time, priority (A/B/C <-> 1/5/9),
 ;;     flagged/starred, notes
+;;   - Selective list sync via `org-apple-reminders-included-lists'
 ;;   - Progress cookies [N/M] on list headings
 ;;   - Live dashboard in *Apple Reminders* buffer
 ;;   - Org-agenda integration
@@ -83,6 +84,28 @@ nil (default) means use `org-apple-reminders-sync-file' for the agenda.
 Set to a file path only if you want a separate read-only agenda file."
   :type '(choice (const :tag "Use sync file (default)" nil) file)
   :group 'org-apple-reminders)
+
+(defcustom org-apple-reminders-included-lists nil
+  "Apple Reminders lists to include in bidirectional sync.
+nil (the default) means all lists are synced.
+Set to a list of list-name strings to limit sync to those lists only:
+
+  (setq org-apple-reminders-included-lists \\='(\"Work\" \"Personal\"))
+
+Items already present in the org file are always kept in sync regardless
+of this setting; the filter only prevents NEW Apple items from being
+pulled into lists that are not included."
+  :type '(choice (const  :tag "All lists" nil)
+                 (repeat :tag "Specific lists" string))
+  :group 'org-apple-reminders)
+
+;;; List filter
+
+(defun org-apple-reminders--list-included-p (list-name)
+  "Return non-nil if LIST-NAME should participate in sync.
+Always true when `org-apple-reminders-included-lists' is nil."
+  (or (null org-apple-reminders-included-lists)
+      (member list-name org-apple-reminders-included-lists)))
 
 ;;; Internal state
 
@@ -680,13 +703,14 @@ Conflict resolution:
           (dolist (entry data)
             (let ((lname (alist-get 'list  entry))
                   (items (alist-get 'items entry)))
-              (dolist (item items)
-                (when (and (not (member (alist-get 'id item) known-ids))
-                           (not (eq (alist-get 'completed item) t)))
-                  (org-apple-reminders--goto-list-heading lname)
-                  (push (point-marker) changed-positions)
-                  (org-apple-reminders--insert-org-heading item lname)
-                  (setq n-pulled (1+ n-pulled)))))))
+              (when (org-apple-reminders--list-included-p lname)
+                (dolist (item items)
+                  (when (and (not (member (alist-get 'id item) known-ids))
+                             (not (eq (alist-get 'completed item) t)))
+                    (org-apple-reminders--goto-list-heading lname)
+                    (push (point-marker) changed-positions)
+                    (org-apple-reminders--insert-org-heading item lname)
+                    (setq n-pulled (1+ n-pulled))))))))
         (org-map-entries
          (lambda ()
            (when-let (id (org-entry-get nil "REMINDER_ID"))
@@ -831,16 +855,17 @@ Conflict resolution:
                      (dolist (entry data)
                        (let ((lname (alist-get 'list  entry))
                              (items (alist-get 'items entry)))
-                         (dolist (item items)
-                           (when (and (not (member (alist-get 'id item) known-ids))
-                                      (not (eq (alist-get 'completed item) t)))
-                             (org-apple-reminders--goto-list-heading lname)
-                             (org-apple-reminders--insert-org-heading item lname)
-                             (save-excursion
-                               (org-back-to-heading t)
-                               (let ((md (alist-get 'modDate item)))
-                                 (when (stringp md)
-                                   (org-set-property "REMINDER_APPLE_MOD" md))))))))
+                         (when (org-apple-reminders--list-included-p lname)
+                           (dolist (item items)
+                             (when (and (not (member (alist-get 'id item) known-ids))
+                                        (not (eq (alist-get 'completed item) t)))
+                               (org-apple-reminders--goto-list-heading lname)
+                               (org-apple-reminders--insert-org-heading item lname)
+                               (save-excursion
+                                 (org-back-to-heading t)
+                                 (let ((md (alist-get 'modDate item)))
+                                   (when (stringp md)
+                                     (org-set-property "REMINDER_APPLE_MOD" md)))))))))
                    (org-map-entries
                     (lambda ()
                       (when-let (id (org-entry-get nil "REMINDER_ID"))
