@@ -221,6 +221,13 @@ JSON.stringify(out);"
    (format "Application('Reminders').lists.byName(%s).reminders.byId(%s).completed=true;"
            (json-encode list-name) (json-encode id))))
 
+(defun org-apple-reminders--delete-in-apple (list-name id &optional callback)
+  "Delete Apple reminder ID from LIST-NAME asynchronously."
+  (org-apple-reminders--jxa-async
+   (format "Application('Reminders').lists.byName(%s).reminders.byId(%s).delete();"
+           (json-encode list-name) (json-encode id))
+   callback))
+
 (defun org-apple-reminders--create-in-apple (list-name vals)
   "Create Apple reminder in LIST-NAME from VALS alist.
 Return new ID string or nil."
@@ -329,6 +336,45 @@ With prefix arg, prompt for list name."
       (org-set-property "REMINDER_ID"   new-id)
       (org-set-property "REMINDER_LIST" list)
       (message "Pushed to Apple Reminders [%s]: %s" list (alist-get 'title vals)))))
+
+;;;###autoload
+(defun org-apple-reminders-delete-reminder ()
+  "Delete the reminder at point from Apple Reminders and from reminders.org.
+Works in both the *Apple Reminders* dashboard and in reminders.org directly."
+  (interactive)
+  (let ((loc (org-apple-reminders--loc-at-point)))
+    (unless loc (user-error "No reminder at point"))
+    (let* ((lname (car loc))
+           (id    (cdr loc))
+           (title (save-excursion
+                    (org-back-to-heading t)
+                    (org-get-heading t t t t))))
+      (unless (yes-or-no-p (format "Delete \"%s\" from Apple Reminders and org? " title))
+        (user-error "Aborted"))
+      (org-apple-reminders--delete-in-apple lname id)
+      (when-let (entry (cl-find lname org-apple-reminders--cache
+                                :key (lambda (e) (alist-get 'list e))
+                                :test #'string=))
+        (let ((cell (assq 'items entry)))
+          (when cell
+            (setcdr cell (cl-remove id (cdr cell)
+                                    :key (lambda (e) (alist-get 'id e))
+                                    :test #'string=)))))
+      (let* ((file (expand-file-name org-apple-reminders-sync-file))
+             (in-dashboard (string= (buffer-name) "*Apple Reminders*")))
+        (when (file-exists-p file)
+          (with-current-buffer (find-file-noselect file)
+            (let ((org-apple-reminders--syncing t))
+              (when-let (pos (org-find-property "REMINDER_ID" id))
+                (goto-char pos)
+                (org-back-to-heading t)
+                (let ((beg (point))
+                      (end (save-excursion (org-end-of-subtree t t) (point))))
+                  (delete-region beg end))
+                (save-buffer)))))
+        (when in-dashboard
+          (org-apple-reminders-dashboard--render org-apple-reminders--cache)))
+      (message "Deleted: %s" title))))
 
 ;;; Live hooks: TODO state, priority, deadline, tags
 
@@ -902,6 +948,7 @@ Conflict resolution:
         (define-key map (kbd "C-c C-t") #'org-apple-reminders-dashboard-complete)
         (define-key map (kbd "h")       #'org-apple-reminders-toggle-done)
         (define-key map (kbd "e")       #'org-apple-reminders-dashboard-jump-to-org)
+        (define-key map (kbd "d")       #'org-apple-reminders-delete-reminder)
         (use-local-map map)))
     (unless (get-buffer-window buf) (switch-to-buffer buf))))
 
