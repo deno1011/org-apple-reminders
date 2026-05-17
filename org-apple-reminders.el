@@ -291,7 +291,11 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
                        (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00"))))
              "r.dueDate=null;"))))
     (if callback
-        (org-apple-reminders--jxa-async script callback)
+        (org-apple-reminders--jxa-async
+         script
+         (lambda (raw)
+           (funcall callback
+                    (condition-case nil (json-parse-string raw) (error nil)))))
       (condition-case nil
           (json-parse-string (org-apple-reminders--jxa-run script))
         (error nil)))))
