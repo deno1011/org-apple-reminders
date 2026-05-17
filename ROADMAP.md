@@ -5,17 +5,21 @@ Items are roughly ordered by priority.
 
 ## In Progress
 
+_(nothing in active development)_
+
+## Done
+
 - **Delete reminder** (`org-apple-reminders-delete-reminder`) — removes a
   reminder from both Apple and reminders.org in one step. Works from the
   dashboard (`d`) and directly in reminders.org. ✓ Merged to `main`.
 
+- **Due time** — Apple's time component now round-trips: Apple `HH:MM` →
+  org `<YYYY-MM-DD Dow HH:MM>` → Apple `HH:MM`. Date-only reminders are
+  unaffected. ✓ Merged to `main` (v1.1).
+
 ## Planned
 
 ### Reminder management
-
-- **Due time** — Apple stores a time alongside the due date; currently only
-  the date is synced and the time is silently lost. Plan: sync to org
-  `DEADLINE` as `<2025-12-31 Mon 09:00>` and round-trip it back.
 
 - **Recurring reminders** — Apple has `recurrenceRule` (daily/weekly/monthly
   etc.); org has `SCHEDULED` with repeaters (`.+1w`, `++1m` etc.). Plan: map
