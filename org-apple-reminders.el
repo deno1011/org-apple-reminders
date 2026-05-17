@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Denis Butic
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
-;; Version: 1.0
+;; Version: 1.1
 ;; Package-Requires: ((emacs "27.1") (org "9.3") (cl-lib "0.5"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -177,8 +177,11 @@ CALLBACK receives the stdout string when the process exits."
                    "^\\(?:\\[#[ABC]\\] \\)?\\(?:★ \\)?" "" raw))
            (dl    (org-entry-get nil "DEADLINE"))
            (due   (when (and dl (string-match
-                                 "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" dl))
-                    (match-string 1 dl)))
+                                 "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)\\(?:[^0-9]*\\([0-9]\\{2\\}:[0-9]\\{2\\}\\)\\)?"
+                                 dl))
+                    (let ((date (match-string 1 dl))
+                          (time (match-string 2 dl)))
+                      (if time (concat date "T" time) date))))
            (prio-char (nth 3 (org-heading-components)))
            (prio  (cond ((eql prio-char ?A) 1)
                         ((eql prio-char ?B) 5)
@@ -193,6 +196,19 @@ CALLBACK receives the stdout string when the process exits."
   "Return org priority prefix string for Apple priority integer P."
   (cond ((eql p 1) "[#A] ") ((eql p 5) "[#B] ") ((eql p 9) "[#C] ") (t "")))
 
+(defun org-apple-reminders--format-due (due)
+  "Format DUE string (YYYY-MM-DD or YYYY-MM-DDTHH:MM) as an org deadline timestamp."
+  (let* ((has-time (string-match "T\\([0-9]\\{2\\}:[0-9]\\{2\\}\\)" due))
+         (time-str (when has-time (match-string 1 due)))
+         (date-str (substring due 0 10))
+         (time-obj (date-to-time (concat date-str (if has-time
+                                                      (concat "T" time-str ":00")
+                                                    "T12:00:00"))))
+         (dow (format-time-string "%a" time-obj)))
+    (if has-time
+        (format "<%s %s %s>" date-str dow time-str)
+      (format "<%s %s>" date-str dow))))
+
 ;;; Apple Reminders API (JXA)
 
 (defconst org-apple-reminders--fetch-script
@@ -206,7 +222,7 @@ app.lists().forEach(function(l){
   for(var i=0;i<names.length;i++){
     var d=dates[i],md=mods[i];
     items.push({id:ids[i],title:names[i],notes:bodies[i]||'',
-                due:(d&&d instanceof Date&&!isNaN(d)&&d.getFullYear()>1970)?(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')):null,
+                due:(d&&d instanceof Date&&!isNaN(d)&&d.getFullYear()>1970)?(function(){var ds=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');var h=d.getHours(),m=d.getMinutes();return(h||m)?ds+'T'+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'):ds;}()):null,
                 priority:prios[i],flagged:flags[i],completed:!!compl[i],
                 modDate:(md&&md instanceof Date&&!isNaN(md))?md.toISOString():null});
   }
@@ -247,7 +263,8 @@ JSON.stringify(newId);"
            (json-encode list-name)
            (json-encode title) (json-encode notes) prio
            (if flagged "true" "false")
-           (if due (format ",dueDate:new Date(%s)" (json-encode (concat due "T00:00:00"))) ""))))
+           (if due (format ",dueDate:new Date(%s)"
+                           (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))) ""))))
     (condition-case nil
         (json-parse-string (org-apple-reminders--jxa-run script))
       (error nil))))
@@ -270,7 +287,8 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
            (json-encode title) (json-encode notes) prio
            (if flagged "true" "false")
            (if due
-               (format "r.dueDate=new Date(%s);" (json-encode (concat due "T00:00:00")))
+               (format "r.dueDate=new Date(%s);"
+                       (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00"))))
              "r.dueDate=null;"))))
     (if callback
         (org-apple-reminders--jxa-async script callback)
@@ -448,7 +466,7 @@ Works in both the *Apple Reminders* dashboard and in reminders.org directly."
                     (if (eq flagged t) "★ " "")
                     title))
     (when (and due (not (eq due :null)))
-      (insert (format "   DEADLINE: <%s>\n" due)))
+      (insert (format "   DEADLINE: %s\n" (org-apple-reminders--format-due due))))
     (insert (format "   :PROPERTIES:\n   :REMINDER_ID:   %s\n   :REMINDER_LIST: %s\n   :END:\n"
                     id list-name))
     (when (and (stringp notes) (not (string-empty-p notes)))
@@ -879,7 +897,7 @@ Conflict resolution:
                     (if (eq flagged t) "★ " "")
                     title))
     (when (and due (not (eq due :null)))
-      (insert (format "   DEADLINE: <%s>\n" due)))
+      (insert (format "   DEADLINE: %s\n" (org-apple-reminders--format-due due))))
     (insert (format "   :PROPERTIES:\n   :REMINDER_ID:   %s\n   :REMINDER_LIST: %s\n   :END:\n"
                     id lname))
     (when (and (stringp notes) (not (string-empty-p notes)))
