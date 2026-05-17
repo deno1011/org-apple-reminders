@@ -6,7 +6,8 @@ Bidirectional sync between Emacs [org-mode](https://orgmode.org) and macOS Apple
 
 - Full bidirectional sync: org ↔ Apple Reminders
 - Conflict resolution via dual timestamps (`REMINDER_APPLE_MOD` / `REMINDER_ORG_MOD`)
-- Fields synced: title, due date, priority (A/B/C ↔ 1/5/9), flagged/starred, notes
+- Fields synced: title, due date + time, priority (A/B/C ↔ 1/5/9), flagged/starred, notes
+- Selective list sync — choose which Apple lists appear in org
 - Progress cookies `[N/M]` on list headings
 - Live dashboard in `*Apple Reminders*` buffer
 - Org-agenda and org-capture integration
@@ -28,6 +29,9 @@ Bidirectional sync between Emacs [org-mode](https://orgmode.org) and macOS Apple
   :after org
   :config
   (setq org-apple-reminders-sync-file "~/org/reminders.org")
+  ;; Optional: limit which Apple lists are pulled into org.
+  ;; Run M-x org-apple-reminders-show-lists to see your list names.
+  ;; (setq org-apple-reminders-included-lists '("Work" "Personal"))
   (org-apple-reminders-setup))
 ```
 
@@ -131,6 +135,31 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 | `org-apple-reminders-show-lists` | List all Apple Reminders lists |
 | `org-apple-reminders-create-list` | Create a new Apple Reminders list |
 | `org-apple-reminders-migrate-flat-headings` | One-time migration from flat layout |
+
+### Selective list sync
+
+By default every Apple Reminders list is mirrored into org. If you have
+shopping lists, cleaning schedules, or OmniFocus mirrors that you never want
+in org-agenda, use `org-apple-reminders-included-lists` to restrict the sync.
+
+**Step 1** — find your list names:
+
+```
+M-x org-apple-reminders-show-lists
+```
+
+**Step 2** — add to your config (before or inside `use-package :config`):
+
+```emacs-lisp
+(setq org-apple-reminders-included-lists '("Work" "Personal"))
+```
+
+Only new Apple items from the listed lists will be pulled into org. Items
+already present in the org file (with a `REMINDER_ID`) continue to sync
+bidirectionally regardless of this setting — removing a list from the variable
+does not delete its existing org headings.
+
+Set to `nil` (the default) to sync all lists.
 
 ### Live editing in reminders.org
 
