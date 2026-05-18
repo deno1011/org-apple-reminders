@@ -1480,16 +1480,17 @@ only list headings are visible initially.  The local keymap extends
           (let* ((lname (alist-get 'list  entry))
                  (items (alist-get 'items entry))
                  (done  (cdr (cl-assoc lname org-apple-reminders--done-items :test #'string=))))
-            (insert (format "* %s\n" lname))
-            (cond
-             ((and (null items) (or (null done) (not org-apple-reminders--show-done)))
-              (insert "  /No open reminders./\n\n"))
-             (t
-              (dolist (item items)
-                (org-apple-reminders--insert-item item lname "TODO"))
-              (when (and done org-apple-reminders--show-done)
-                (dolist (item done)
-                  (org-apple-reminders--insert-item item lname "DONE")))))))
+            (when (org-apple-reminders--list-included-p lname)
+              (insert (format "* %s\n" lname))
+              (cond
+               ((and (null items) (or (null done) (not org-apple-reminders--show-done)))
+                (insert "  /No open reminders./\n\n"))
+               (t
+                (dolist (item items)
+                  (org-apple-reminders--insert-item item lname "TODO"))
+                (when (and done org-apple-reminders--show-done)
+                  (dolist (item done)
+                    (org-apple-reminders--insert-item item lname "DONE"))))))))
         (org-content)
         (goto-char (min saved-pos (point-max))))
       (setq buffer-read-only t)
