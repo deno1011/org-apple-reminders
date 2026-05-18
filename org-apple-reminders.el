@@ -504,22 +504,21 @@ Works in both the *Apple Reminders* dashboard and in reminders.org directly."
 
 (defun org-apple-reminders--push-to-apple ()
   "Push changed org entries to Apple.  New items get REMINDER_ID stamped back."
-  (let* ((list-name (or org-apple-reminders-sync-list (org-apple-reminders--default-list)))
-         (n-new 0) (n-updated 0)
+  (let* ((n-new 0) (n-updated 0)
          new-pts)
     (org-map-entries
      (lambda ()
        (let* ((id     (org-entry-get nil "REMINDER_ID"))
-              (rlist  (or (org-entry-get nil "REMINDER_LIST") list-name))
+              (rlist  (org-entry-get nil "REMINDER_LIST"))
               (state  (org-get-todo-state))
               (cached (and id (org-apple-reminders--find-in-cache id))))
          (cond
           ((and (null id) (member state '("TODO" "NEXT" "WAITING")))
            (push (point-marker) new-pts))
-          ((and id (member state '("DONE" "CANCELLED")))
+          ((and id rlist (member state '("DONE" "CANCELLED")))
            (when (and cached (not (eq (alist-get 'completed cached) t)))
              (org-apple-reminders--complete-in-apple rlist id)))
-          ((and id (member state '("TODO" "NEXT" "WAITING")))
+          ((and id rlist (member state '("TODO" "NEXT" "WAITING")))
            (let* ((vals (org-apple-reminders--org-item-values))
                   (needs-push
                    (or (null cached)
@@ -535,18 +534,30 @@ Works in both the *Apple Reminders* dashboard and in reminders.org directly."
                        (not (eq (alist-get 'flagged vals)
                                 (eq (alist-get 'flagged cached) t))))))
              (when needs-push
-               (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
-                 (when (stringp new-mod)
-                   (org-set-property "REMINDER_ORG_MOD" new-mod)))
+               ;; Async update — capture position for the callback to stamp REMINDER_ORG_MOD
+               (let ((m (point-marker)))
+                 (org-apple-reminders--update-in-apple
+                  rlist id vals
+                  (lambda (new-mod)
+                    (when (and (stringp new-mod) (marker-buffer m))
+                      (with-current-buffer (marker-buffer m)
+                        (save-excursion
+                          (goto-char m)
+                          (org-set-property "REMINDER_ORG_MOD" new-mod))))
+                    (set-marker m nil))))
                (setq n-updated (1+ n-updated))))))))
      nil nil)
-    (dolist (m (nreverse new-pts))
-      (goto-char m)
-      (when-let (new-id (org-apple-reminders--create-in-apple
-                         list-name (org-apple-reminders--org-item-values)))
-        (org-set-property "REMINDER_ID"   new-id)
-        (org-set-property "REMINDER_LIST" list-name)
-        (setq n-new (1+ n-new))))
+    ;; Create new items (sync — need the Apple ID back to stamp REMINDER_ID).
+    ;; Defer --default-list lookup until we know there are new items.
+    (when new-pts
+      (let ((list-name (or org-apple-reminders-sync-list (org-apple-reminders--default-list))))
+        (dolist (m (nreverse new-pts))
+          (goto-char m)
+          (when-let (new-id (org-apple-reminders--create-in-apple
+                             list-name (org-apple-reminders--org-item-values)))
+            (org-set-property "REMINDER_ID"   new-id)
+            (org-set-property "REMINDER_LIST" list-name)
+            (setq n-new (1+ n-new))))))
     (when (or (> n-new 0) (> n-updated 0))
       (message "Reminders push: %d new, %d updated." n-new n-updated))))
 
@@ -1089,9 +1100,21 @@ Conflict resolution:
              (not org-apple-reminders--syncing)
              (string= (expand-file-name (buffer-file-name))
                       (expand-file-name org-apple-reminders-sync-file)))
-    (let ((org-apple-reminders--syncing t))
+    (let ((org-apple-reminders--syncing t)
+          (buf (current-buffer)))
       (org-apple-reminders--push-to-apple)
-      (when (buffer-modified-p) (save-buffer)))))
+      (when (buffer-modified-p) (save-buffer))
+      ;; Async update callbacks stamp REMINDER_ORG_MOD after this save returns.
+      ;; Schedule a follow-up save so those changes are persisted to disk.
+      (run-with-idle-timer
+       2 nil
+       (lambda ()
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (when (and (buffer-modified-p)
+                        (not org-apple-reminders--syncing))
+               (let ((org-apple-reminders--syncing t))
+                 (save-buffer))))))))))
 
 (add-hook 'after-save-hook #'org-apple-reminders--on-save)
 

@@ -889,9 +889,13 @@ last background pull or full sync.
 
 The function does one pass over all org entries with =org-map-entries=,
 sorting them into buckets: new items (no =REMINDER_ID=) go into =new-pts=;
-existing items that changed are pushed immediately (synchronous
-=--update-in-apple= returns the new =modificationDate= which is stamped as
-=REMINDER_ORG_MOD=); completed items trigger an async complete call.
+existing items that need updating are pushed *asynchronously* (a marker
+captures the position so the callback can stamp =REMINDER_ORG_MOD= once Apple
+responds); completed items trigger an async complete call.
+
+=--default-list= is fetched lazily — only when there are new items that
+actually need it — so a typical save with no new items makes zero JXA calls
+during the map pass, keeping the save hook non-blocking.
 
 New items are processed after the scan pass so that setting
 =REMINDER_ID= / =REMINDER_LIST= properties on them does not interfere with
@@ -900,22 +904,21 @@ the =org-map-entries= iteration.
 #+begin_src emacs-lisp :tangle yes
 (defun org-apple-reminders--push-to-apple ()
   "Push changed org entries to Apple.  New items get REMINDER_ID stamped back."
-  (let* ((list-name (or org-apple-reminders-sync-list (org-apple-reminders--default-list)))
-         (n-new 0) (n-updated 0)
+  (let* ((n-new 0) (n-updated 0)
          new-pts)
     (org-map-entries
      (lambda ()
        (let* ((id     (org-entry-get nil "REMINDER_ID"))
-              (rlist  (or (org-entry-get nil "REMINDER_LIST") list-name))
+              (rlist  (org-entry-get nil "REMINDER_LIST"))
               (state  (org-get-todo-state))
               (cached (and id (org-apple-reminders--find-in-cache id))))
          (cond
           ((and (null id) (member state '("TODO" "NEXT" "WAITING")))
            (push (point-marker) new-pts))
-          ((and id (member state '("DONE" "CANCELLED")))
+          ((and id rlist (member state '("DONE" "CANCELLED")))
            (when (and cached (not (eq (alist-get 'completed cached) t)))
              (org-apple-reminders--complete-in-apple rlist id)))
-          ((and id (member state '("TODO" "NEXT" "WAITING")))
+          ((and id rlist (member state '("TODO" "NEXT" "WAITING")))
            (let* ((vals (org-apple-reminders--org-item-values))
                   (needs-push
                    (or (null cached)
@@ -931,18 +934,30 @@ the =org-map-entries= iteration.
                        (not (eq (alist-get 'flagged vals)
                                 (eq (alist-get 'flagged cached) t))))))
              (when needs-push
-               (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
-                 (when (stringp new-mod)
-                   (org-set-property "REMINDER_ORG_MOD" new-mod)))
+               ;; Async update — capture position for the callback to stamp REMINDER_ORG_MOD
+               (let ((m (point-marker)))
+                 (org-apple-reminders--update-in-apple
+                  rlist id vals
+                  (lambda (new-mod)
+                    (when (and (stringp new-mod) (marker-buffer m))
+                      (with-current-buffer (marker-buffer m)
+                        (save-excursion
+                          (goto-char m)
+                          (org-set-property "REMINDER_ORG_MOD" new-mod))))
+                    (set-marker m nil))))
                (setq n-updated (1+ n-updated))))))))
      nil nil)
-    (dolist (m (nreverse new-pts))
-      (goto-char m)
-      (when-let (new-id (org-apple-reminders--create-in-apple
-                         list-name (org-apple-reminders--org-item-values)))
-        (org-set-property "REMINDER_ID"   new-id)
-        (org-set-property "REMINDER_LIST" list-name)
-        (setq n-new (1+ n-new))))
+    ;; Create new items (sync — need the Apple ID back to stamp REMINDER_ID).
+    ;; Defer --default-list lookup until we know there are new items.
+    (when new-pts
+      (let ((list-name (or org-apple-reminders-sync-list (org-apple-reminders--default-list))))
+        (dolist (m (nreverse new-pts))
+          (goto-char m)
+          (when-let (new-id (org-apple-reminders--create-in-apple
+                             list-name (org-apple-reminders--org-item-values)))
+            (org-set-property "REMINDER_ID"   new-id)
+            (org-set-property "REMINDER_LIST" list-name)
+            (setq n-new (1+ n-new))))))
     (when (or (> n-new 0) (> n-updated 0))
       (message "Reminders push: %d new, %d updated." n-new n-updated))))
 #+end_src
@@ -1580,10 +1595,12 @@ three conditions before doing anything: the buffer must have a file name, a
 sync must not already be in progress (=--syncing= guard), and the saved file
 must be exactly =org-apple-reminders-sync-file=.
 
-If =--push-to-apple= modifies the buffer (e.g. by stamping =REMINDER_ORG_MOD=
-or setting a new =REMINDER_ID=), the buffer becomes modified again.  The
-=save-buffer= call at the end handles this with =--syncing= still =t= so it
-does not recurse.
+Because updates to Apple are now async, the callbacks that stamp
+=REMINDER_ORG_MOD= fire /after/ =--on-save= returns.  A 2-second idle timer
+picks up those changes and saves the file so =REMINDER_ORG_MOD= values are
+persisted before the next pull.  New items still get =REMINDER_ID= stamped
+synchronously (the same save) because they need the Apple-assigned ID to exist
+before any future push can reference them.
 
 #+begin_src emacs-lisp :tangle yes
 (defun org-apple-reminders--on-save ()
@@ -1592,9 +1609,21 @@ does not recurse.
              (not org-apple-reminders--syncing)
              (string= (expand-file-name (buffer-file-name))
                       (expand-file-name org-apple-reminders-sync-file)))
-    (let ((org-apple-reminders--syncing t))
+    (let ((org-apple-reminders--syncing t)
+          (buf (current-buffer)))
       (org-apple-reminders--push-to-apple)
-      (when (buffer-modified-p) (save-buffer)))))
+      (when (buffer-modified-p) (save-buffer))
+      ;; Async update callbacks stamp REMINDER_ORG_MOD after this save returns.
+      ;; Schedule a follow-up save so those changes are persisted to disk.
+      (run-with-idle-timer
+       2 nil
+       (lambda ()
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (when (and (buffer-modified-p)
+                        (not org-apple-reminders--syncing))
+               (let ((org-apple-reminders--syncing t))
+                 (save-buffer))))))))))
 
 (add-hook 'after-save-hook #'org-apple-reminders--on-save)
 #+end_src
