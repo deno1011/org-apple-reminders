@@ -118,6 +118,9 @@ Always true when `org-apple-reminders-included-lists' is nil."
 (defvar org-apple-reminders--done-items nil
   "Alist of (list-name . (item ...)) for reminders completed this session.")
 
+(defvar org-apple-reminders--pending-completions nil
+  "List of reminder IDs with a completion JXA call currently in flight.")
+
 (defvar org-apple-reminders--show-done nil
   "When non-nil, show session-completed reminders at the bottom of each list.")
 
@@ -981,6 +984,24 @@ Conflict resolution:
         (erase-buffer)
         (org-mode)
         (insert "#+TITLE: Apple Reminders\n\n")
+        ;; Reconcile done-items: if Apple shows an item as active and it is not
+        ;; in-flight (pending), it was re-enabled externally — restore it.
+        (dolist (entry data)
+          (let* ((lname     (alist-get 'list  entry))
+                 (done-cell (cl-assoc lname org-apple-reminders--done-items
+                                      :test #'string=)))
+            (when done-cell
+              (dolist (item (alist-get 'items entry))
+                (let ((id (alist-get 'id item)))
+                  (when (and (not (eq (alist-get 'completed item) t))
+                             (not (member id org-apple-reminders--pending-completions))
+                             (cl-find id (cdr done-cell)
+                                      :key (lambda (e) (alist-get 'id e))
+                                      :test #'string=))
+                    (setcdr done-cell
+                            (cl-remove id (cdr done-cell)
+                                       :key (lambda (e) (alist-get 'id e))
+                                       :test #'string=))))))))
         (dolist (entry data)
           (let* ((lname (alist-get 'list  entry))
                  (items (alist-get 'items entry))
@@ -1034,6 +1055,7 @@ Conflict resolution:
   "Fetch all reminders asynchronously, reset session-done list, re-render."
   (interactive)
   (setq org-apple-reminders--done-items nil)
+  (setq org-apple-reminders--pending-completions nil)
   (message "Apple Reminders: refreshing…")
   (org-apple-reminders--jxa-async
    org-apple-reminders--fetch-script
@@ -1084,6 +1106,7 @@ Conflict resolution:
                              :key (lambda (e) (alist-get 'id e))
                              :test #'string=))))
       (when item
+        (push id org-apple-reminders--pending-completions)
         (let ((done-cell (cl-assoc lname org-apple-reminders--done-items :test #'string=)))
           (if done-cell
               (setcdr done-cell (cons item (cdr done-cell)))
@@ -1098,7 +1121,10 @@ Conflict resolution:
       (org-apple-reminders--jxa-async
        (format "var app=Application('Reminders');app.lists.byName(%s).reminders.byId(%s).completed=true;"
                (json-encode (car loc)) (json-encode (cdr loc)))
-       (lambda (_) (message "Apple Reminders: completed.  Press h to show done items."))))))
+       (lambda (_)
+         (setq org-apple-reminders--pending-completions
+               (delete id org-apple-reminders--pending-completions))
+         (message "Apple Reminders: completed.  Press h to show done items."))))))
 
 (defun org-apple-reminders-dashboard-reopen ()
   "Mark completed reminder at point as incomplete; push to Apple."
@@ -1112,6 +1138,8 @@ Conflict resolution:
                    (cl-find id (cdr done-cell)
                             :key (lambda (e) (alist-get 'id e))
                             :test #'string=))))
+      (setq org-apple-reminders--pending-completions
+            (delete id org-apple-reminders--pending-completions))
       (when (and done-cell item)
         (setcdr done-cell (cl-remove id (cdr done-cell)
                                      :key (lambda (e) (alist-get 'id e))
@@ -1236,6 +1264,7 @@ With prefix ARG, clear the due date instead."
                                       :key (lambda (e) (alist-get 'id e))
                                       :test #'string=))))
                 (when item
+                  (push id org-apple-reminders--pending-completions)
                   (let ((done-cell (cl-assoc lname org-apple-reminders--done-items
                                              :test #'string=)))
                     (if done-cell
@@ -1246,6 +1275,8 @@ With prefix ARG, clear the due date instead."
                                           :key (lambda (e) (alist-get 'id e))
                                           :test #'string=)))))
             ;; Done → active: restore item from session-done list
+            (setq org-apple-reminders--pending-completions
+                  (delete id org-apple-reminders--pending-completions))
             (let* ((done-cell (cl-assoc lname org-apple-reminders--done-items
                                         :test #'string=))
                    (item (when done-cell
@@ -1265,7 +1296,11 @@ With prefix ARG, clear the due date instead."
            (format "Application('Reminders').lists.byName(%s).reminders.byId(%s).completed=%s;"
                    (json-encode lname) (json-encode id)
                    (if is-done "true" "false"))
-           (lambda (_) nil))
+           (if is-done
+               (lambda (_)
+                 (setq org-apple-reminders--pending-completions
+                       (delete id org-apple-reminders--pending-completions)))
+             (lambda (_) nil)))
           (when org-apple-reminders--cache
             (org-apple-reminders-dashboard--render org-apple-reminders--cache)))))))
 
