@@ -123,41 +123,35 @@ Always true when `org-apple-reminders-included-lists' is nil."
 (defun org-apple-reminders--known-files ()
   "Deduped list of all org files that may contain REMINDER_ID headings.
 Includes `org-apple-reminders-sync-file', `org-apple-reminders-extra-files',
-and .org files from `org-agenda-files'."
+.org files from `org-agenda-files', and any currently open org buffer that
+already contains at least one REMINDER_ID (so files linked via
+`org-apple-reminders-push-heading' are picked up without manual config)."
   (delete-dups
    (mapcar #'expand-file-name
            (append (list org-apple-reminders-sync-file)
                    org-apple-reminders-extra-files
                    (cl-remove-if-not
                     (lambda (f) (string-match-p "\\.org\\'" f))
-                    org-agenda-files)))))
+                    org-agenda-files)
+                   (delq nil
+                         (mapcar (lambda (buf)
+                                   (with-current-buffer buf
+                                     (and (buffer-file-name)
+                                          (derived-mode-p 'org-mode)
+                                          (org-apple-reminders--buffer-has-reminders-p)
+                                          (buffer-file-name))))
+                                 (buffer-list)))))))
 
 (defun org-apple-reminders--build-id-index ()
-  "Scan all known org files; return hash REMINDER_ID → expanded file path.
-Also scans open org buffers visiting files outside the known-files list,
-so that headings pushed via `org-apple-reminders-push-heading' in
-unregistered files are not re-inserted into the sync file."
-  (let ((ht (make-hash-table :test #'equal))
-        (known (org-apple-reminders--known-files)))
-    (dolist (file known)
+  "Scan all known org files; return hash REMINDER_ID → expanded file path."
+  (let ((ht (make-hash-table :test #'equal)))
+    (dolist (file (org-apple-reminders--known-files))
       (when (file-exists-p file)
         (with-current-buffer (find-file-noselect file)
           (org-map-entries
            (lambda ()
              (when-let (id (org-entry-get nil "REMINDER_ID"))
                (puthash id (expand-file-name file) ht)))
-           nil nil))))
-    ;; Also catch open buffers not yet in known-files (e.g. just push-heading'd)
-    (dolist (buf (buffer-list))
-      (with-current-buffer buf
-        (when (and (buffer-file-name)
-                   (derived-mode-p 'org-mode)
-                   (not (member (expand-file-name (buffer-file-name)) known))
-                   (org-apple-reminders--buffer-has-reminders-p))
-          (org-map-entries
-           (lambda ()
-             (when-let (id (org-entry-get nil "REMINDER_ID"))
-               (puthash id (expand-file-name (buffer-file-name)) ht)))
            nil nil))))
     ht))
 
@@ -722,6 +716,7 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                           (a-due    (let ((d (alist-get 'due apple)))
                                                       (and (stringp d) (not (string-empty-p d)) d)))
                                           (a-flagged (eq (alist-get 'flagged apple) t))
+                                          (a-title  (or (alist-get 'title apple) ""))
                                           (p-char   (nth 3 (org-heading-components)))
                                           (o-prio   (cond ((eql p-char ?A) 1)
                                                           ((eql p-char ?B) 5)
@@ -732,12 +727,15 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                                     "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" dl))
                                                         (match-string 1 dl))))
                                           (o-flagged (not (null (member "flagged" (org-get-tags nil t)))))
+                                          (o-title  (org-get-heading t t t t))
                                           (changed  (or (/= a-prio o-prio)
                                                         (not (equal a-due o-due))
-                                                        (not (eq a-flagged o-flagged)))))
+                                                        (not (eq a-flagged o-flagged))
+                                                        (not (equal a-title o-title)))))
                                      (when changed
                                        (push (list (point-marker) rlist
-                                                   a-prio o-prio a-due o-due a-flagged o-flagged a-mod)
+                                                   a-prio o-prio a-due o-due a-flagged o-flagged a-mod
+                                                   a-title o-title)
                                              apple-updates)))
                                  (let* ((vals (org-apple-reminders--org-item-values))
                                         (needs-push
@@ -774,8 +772,17 @@ New Apple items not linked in any known file → pulled into sync-file only."
                           (puthash new-id sync-file id-index)
                           (setq n-pushed (1+ n-pushed))))))
                   (dolist (upd (nreverse apple-updates))
-                    (cl-destructuring-bind (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod) upd
+                    (cl-destructuring-bind (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title) upd
                       (goto-char m) (push (point-marker) changed-positions)
+                      (unless (equal a-title o-title)
+                        (org-back-to-heading t)
+                        (when (looking-at org-complex-heading-regexp)
+                          (let ((beg (match-beginning 4))
+                                (end (match-end 4)))
+                            (when beg
+                              (delete-region beg end)
+                              (goto-char beg)
+                              (insert a-title)))))
                       (unless (= a-prio o-prio)
                         (org-priority (cond ((= a-prio 1) ?A)
                                             ((= a-prio 5) ?B)
@@ -911,20 +918,33 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                                     "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" dl))
                                                         (match-string 1 dl))))
                                          (o-flagged (not (null (member "flagged" (org-get-tags nil t)))))
+                                         (a-title   (or (alist-get 'title aitem) ""))
+                                         (o-title   (org-get-heading t t t t))
                                          (changed   (or (/= a-prio o-prio)
                                                         (not (equal a-due o-due))
-                                                        (not (eq a-flagged o-flagged))))
+                                                        (not (eq a-flagged o-flagged))
+                                                        (not (equal a-title o-title))))
                                          (last-known (org-apple-reminders--last-known-mod))
                                          (apple-changed (and a-mod (or (null last-known)
                                                                         (string> a-mod last-known)))))
                                     (when (and changed apple-changed)
                                       (push (list (point-marker)
-                                                  a-prio o-prio a-due o-due a-flagged o-flagged a-mod)
+                                                  a-prio o-prio a-due o-due a-flagged o-flagged a-mod
+                                                  a-title o-title)
                                             field-updates))))))
                             nil nil)
                            (dolist (upd (nreverse field-updates))
-                             (cl-destructuring-bind (m a-prio o-prio a-due o-due a-flagged o-flagged a-mod) upd
+                             (cl-destructuring-bind (m a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title) upd
                                (goto-char m)
+                               (unless (equal a-title o-title)
+                                 (org-back-to-heading t)
+                                 (when (looking-at org-complex-heading-regexp)
+                                   (let ((beg (match-beginning 4))
+                                         (end (match-end 4)))
+                                     (when beg
+                                       (delete-region beg end)
+                                       (goto-char beg)
+                                       (insert a-title)))))
                                (unless (= a-prio o-prio)
                                  (org-priority (cond ((= a-prio 1) ?A)
                                                      ((= a-prio 5) ?B)
