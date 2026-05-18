@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Denis Butic
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
-;; Version: 1.2
+;; Version: 1.3
 ;; Package-Requires: ((emacs "27.1") (org "9.3") (cl-lib "0.5"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders

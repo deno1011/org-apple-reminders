@@ -21,6 +21,12 @@ _(nothing in active development)_
   list of names to restrict which Apple lists are pulled into org. Items
   already in the org file are always kept in sync. ✓ Merged to `main` (v1.2).
 
+- **Non-blocking save hook** — the `after-save-hook` no longer blocks Emacs
+  while pushing to Apple. `--default-list` is now lazy (only called when new
+  items exist); existing-item updates use async JXA with a marker callback.
+  A 2-second idle timer persists `REMINDER_ORG_MOD` after async callbacks
+  complete. ✓ Merged to `main` (v1.3).
+
 ## Planned
 
 ### Reminder management
