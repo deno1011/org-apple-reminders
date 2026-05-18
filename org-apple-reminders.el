@@ -1094,8 +1094,8 @@ Conflict resolution:
     (save-excursion
       (org-back-to-heading t)
       (let ((inhibit-read-only t)
-            (org-log-done nil)
-            (org-log-reschedule nil))
+            (org-inhibit-logging t)
+            (org-apple-reminders--syncing t))
         (org-todo "DONE")))
     (org-apple-reminders--jxa-async
      (format "var app=Application('Reminders');app.lists.byName(%s).reminders.byId(%s).completed=true;"
@@ -1127,8 +1127,8 @@ Conflict resolution:
       (save-excursion
         (org-back-to-heading t)
         (let ((inhibit-read-only t)
-              (org-log-done nil)
-              (org-log-reschedule nil))
+              (org-inhibit-logging t)
+              (org-apple-reminders--syncing t))
           (org-todo "TODO")))
       (org-apple-reminders--jxa-async
        (format "Application('Reminders').lists.byName(%s).reminders.byId(%s).completed=false;"
@@ -1227,8 +1227,7 @@ With prefix ARG, clear the due date instead."
     (let* ((old-state (org-get-todo-state))
            (was-done  (member old-state org-done-keywords)))
       (let ((inhibit-read-only t)
-            (org-log-done nil)
-            (org-log-reschedule nil)
+            (org-inhibit-logging t)
             (org-apple-reminders--syncing t))
         (org-todo direction))
       (let* ((new-state (org-get-todo-state))
