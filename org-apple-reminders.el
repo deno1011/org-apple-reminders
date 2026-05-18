@@ -187,10 +187,17 @@ CALLBACK receives the stdout string when the process exits."
 
 ;;; List management
 
+(defun org-apple-reminders--cached-list-names ()
+  "Return list names from the in-memory cache, or nil if cache is empty."
+  (when org-apple-reminders--cache
+    (mapcar (lambda (entry) (alist-get 'list entry))
+            org-apple-reminders--cache)))
+
 (defun org-apple-reminders--default-list ()
   "Return `org-apple-reminders-default-list', auto-detecting if nil."
   (or org-apple-reminders-default-list
-      (car (ignore-errors (org-apple-reminders-lists)))))
+      (car (or (org-apple-reminders--cached-list-names)
+               (ignore-errors (org-apple-reminders-lists))))))
 
 (defun org-apple-reminders-lists ()
   "Return a list of Apple Reminders list names."
@@ -394,11 +401,13 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
   "Add a reminder TITLE to LIST-NAME with optional DUE-DATE and NOTES.
 DUE-DATE is an ISO date string like \"2025-12-31\"."
   (interactive
-   (list (read-string "Reminder: ")
-         (completing-read "List: " (org-apple-reminders-lists) nil nil
-                          (org-apple-reminders--default-list))
-         (read-string "Due (optional, e.g. 2025-12-31): ")
-         nil))
+   (let* ((lists   (or (org-apple-reminders--cached-list-names)
+                       (org-apple-reminders-lists)))
+          (default (car lists)))
+     (list (read-string "Reminder: ")
+           (completing-read "List: " lists nil t default)
+           (read-string "Due (optional, e.g. 2025-12-31): ")
+           nil)))
   (let* ((list (or list-name (org-apple-reminders--default-list)))
          (vals `((title . ,title) (notes . ,(or notes ""))
                  (priority . 0) (flagged . nil)
@@ -413,9 +422,11 @@ DUE-DATE is an ISO date string like \"2025-12-31\"."
 (defun org-apple-reminders-push-heading (&optional list-name)
   "Push org heading at point to Apple Reminders, prompting for the target list."
   (interactive
-   (list (completing-read "List: " (org-apple-reminders-lists) nil nil
-                          (or (org-entry-get nil "REMINDER_LIST")
-                              (org-apple-reminders--default-list)))))
+   (let* ((lists   (or (org-apple-reminders--cached-list-names)
+                       (org-apple-reminders-lists)))
+          (default (or (org-entry-get nil "REMINDER_LIST")
+                       (car lists))))
+     (list (completing-read "List: " lists nil t default))))
   (unless (derived-mode-p 'org-mode)
     (user-error "Not in an org-mode buffer"))
   (let* ((list (or list-name (org-apple-reminders--default-list)))
