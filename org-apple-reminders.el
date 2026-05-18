@@ -172,6 +172,12 @@ CALLBACK receives the stdout string when the process exits."
    (lambda (_)
      (message "Apple Reminders: created list \"%s\"." name))))
 
+;;;###autoload
+(defun org-apple-reminders-open-file ()
+  "Open `org-apple-reminders-sync-file' in the current window."
+  (interactive)
+  (find-file (expand-file-name org-apple-reminders-sync-file)))
+
 ;;; Field helpers
 
 (defun org-apple-reminders--extract-notes ()
@@ -1061,6 +1067,7 @@ Call this once from your init file after setting
 Suggested key bindings (add to your init file):
 
   (global-set-key (kbd \"C-c r R\") #\\='org-apple-reminders-sync)
+  (global-set-key (kbd \"C-c r f\") #\\='org-apple-reminders-open-file)
   (global-set-key (kbd \"C-c r a\") #\\='org-apple-reminders-add)
   (global-set-key (kbd \"C-c r l\") #\\='org-apple-reminders-show-lists)
   (global-set-key (kbd \"C-c r L\") #\\='org-apple-reminders-create-list)

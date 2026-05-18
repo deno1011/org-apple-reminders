@@ -10,8 +10,8 @@ _(nothing in active development)_
 ## Done
 
 - **Delete reminder** (`org-apple-reminders-delete-reminder`) — removes a
-  reminder from both Apple and reminders.org in one step. Works from the
-  dashboard (`d`) and directly in reminders.org. ✓ Merged to `main`.
+  reminder from both Apple and reminders.org in one step. Works directly in
+  reminders.org (`C-c r D`). ✓ Merged to `main`.
 
 - **Due time** — Apple's time component now round-trips: Apple `HH:MM` →
   org `<YYYY-MM-DD Dow HH:MM>` → Apple `HH:MM`. Date-only reminders are
@@ -27,10 +27,9 @@ _(nothing in active development)_
   A 2-second idle timer persists `REMINDER_ORG_MOD` after async callbacks
   complete. ✓ Merged to `main` (v1.3).
 
-- **Dashboard interactive actions** — reopen (`u`), priority cycling
-  (`S-<up>` / `S-<down>`), set/clear due date (`D` / `C-c C-d`, `C-u` to
-  clear), TODO state cycling (`S-<right>` / `S-<left>`). All push to Apple
-  immediately via JXA. ✓ Merged to `main` (v1.4–v1.5).
+- **Dashboard interactive actions** — reopen, priority cycling, set/clear due
+  date, TODO state cycling, all pushing to Apple immediately via JXA.
+  ✓ Merged to `main` (v1.4–v1.5); entire dashboard removed in v1.6.
 
 ## Planned
 
@@ -64,16 +63,13 @@ _(nothing in active development)_
 
 ### Dashboard
 
-- **Inline rename** — edit the reminder title directly in the dashboard
-  buffer without jumping to reminders.org.
+The dashboard (`*Apple Reminders*` buffer) was removed in v1.6. All planned
+dashboard features below are no longer applicable.
 
-- **New reminder from dashboard** — press `n` in the dashboard to capture a
-  new reminder without leaving the buffer.
-
-- **Sort** — toggle sort by due date, priority, or list name (`s` key).
-
-- **Filter** — show only due today, only high priority, or a specific list
-  (`/` key).
+- ~~**Inline rename**~~ — not applicable; dashboard removed.
+- ~~**New reminder from dashboard**~~ — not applicable; use `org-apple-reminders-add` instead.
+- ~~**Sort**~~ — not applicable; dashboard removed.
+- ~~**Filter**~~ — not applicable; dashboard removed.
 
 ### Infrastructure
 
