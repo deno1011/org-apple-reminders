@@ -27,6 +27,10 @@ _(nothing in active development)_
   A 2-second idle timer persists `REMINDER_ORG_MOD` after async callbacks
   complete. ✓ Merged to `main` (v1.3).
 
+- **Dashboard interactive actions** — reopen (`u`), priority cycling
+  (`S-<up>` / `S-<down>`), set/clear due date (`D` / `C-c C-d`, `C-u` to
+  clear). All push to Apple immediately via JXA. ✓ Merged to `main` (v1.4).
+
 ## Planned
 
 ### Reminder management

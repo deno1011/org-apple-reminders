@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Denis Butic
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
-;; Version: 1.3
+;; Version: 1.4
 ;; Package-Requires: ((emacs "27.1") (org "9.3") (cl-lib "0.5"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -1001,13 +1001,18 @@ Conflict resolution:
       (setq buffer-read-only t)
       (let ((map (make-sparse-keymap)))
         (set-keymap-parent map org-mode-map)
-        (define-key map (kbd "g")       #'org-apple-reminders-dashboard-refresh)
-        (define-key map (kbd "q")       #'quit-window)
-        (define-key map (kbd "t")       #'org-apple-reminders-dashboard-complete)
-        (define-key map (kbd "C-c C-t") #'org-apple-reminders-dashboard-complete)
-        (define-key map (kbd "h")       #'org-apple-reminders-toggle-done)
-        (define-key map (kbd "e")       #'org-apple-reminders-dashboard-jump-to-org)
-        (define-key map (kbd "d")       #'org-apple-reminders-delete-reminder)
+        (define-key map (kbd "g")         #'org-apple-reminders-dashboard-refresh)
+        (define-key map (kbd "q")         #'quit-window)
+        (define-key map (kbd "t")         #'org-apple-reminders-dashboard-complete)
+        (define-key map (kbd "C-c C-t")   #'org-apple-reminders-dashboard-complete)
+        (define-key map (kbd "u")         #'org-apple-reminders-dashboard-reopen)
+        (define-key map (kbd "h")         #'org-apple-reminders-toggle-done)
+        (define-key map (kbd "e")         #'org-apple-reminders-dashboard-jump-to-org)
+        (define-key map (kbd "d")         #'org-apple-reminders-delete-reminder)
+        (define-key map (kbd "S-<up>")    #'org-apple-reminders-dashboard-priority-up)
+        (define-key map (kbd "S-<down>")  #'org-apple-reminders-dashboard-priority-down)
+        (define-key map (kbd "D")         #'org-apple-reminders-dashboard-set-due)
+        (define-key map (kbd "C-c C-d")   #'org-apple-reminders-dashboard-set-due)
         (use-local-map map)))
     (unless (get-buffer-window buf) (switch-to-buffer buf))))
 
@@ -1092,6 +1097,112 @@ Conflict resolution:
      (format "var app=Application('Reminders');app.lists.byName(%s).reminders.byId(%s).completed=true;"
              (json-encode (car loc)) (json-encode (cdr loc)))
      (lambda (_) (message "Apple Reminders: completed.  Press h to show done items.")))))
+
+(defun org-apple-reminders-dashboard-reopen ()
+  "Mark completed reminder at point as incomplete; push to Apple."
+  (interactive)
+  (let ((loc (org-apple-reminders--loc-at-point)))
+    (unless loc (user-error "No reminder at point"))
+    (let* ((lname (car loc))
+           (id    (cdr loc))
+           (done-cell (cl-assoc lname org-apple-reminders--done-items :test #'string=))
+           (item (when done-cell
+                   (cl-find id (cdr done-cell)
+                            :key (lambda (e) (alist-get 'id e))
+                            :test #'string=))))
+      (when (and done-cell item)
+        (setcdr done-cell (cl-remove id (cdr done-cell)
+                                     :key (lambda (e) (alist-get 'id e))
+                                     :test #'string=))
+        (let* ((list-entry (cl-find lname org-apple-reminders--cache
+                                    :key (lambda (e) (alist-get 'list e))
+                                    :test #'string=))
+               (items-cell (and list-entry (assq 'items list-entry))))
+          (when items-cell
+            (setcdr items-cell (cons item (cdr items-cell))))))
+      (save-excursion
+        (org-back-to-heading t)
+        (let ((inhibit-read-only t))
+          (org-todo "TODO")))
+      (org-apple-reminders--jxa-async
+       (format "Application('Reminders').lists.byName(%s).reminders.byId(%s).completed=false;"
+               (json-encode lname) (json-encode id))
+       (lambda (_)
+         (when org-apple-reminders--cache
+           (org-apple-reminders-dashboard--render org-apple-reminders--cache))
+         (message "Apple Reminders: reopened."))))))
+
+(defun org-apple-reminders--dashboard-find-cache-item (loc)
+  "Return cache item for LOC (list-name . id), or nil."
+  (let* ((lname (car loc))
+         (id    (cdr loc))
+         (entry (cl-find lname org-apple-reminders--cache
+                         :key (lambda (e) (alist-get 'list e))
+                         :test #'string=)))
+    (when entry
+      (cl-find id (alist-get 'items entry)
+               :key (lambda (e) (alist-get 'id e))
+               :test #'string=))))
+
+(defun org-apple-reminders-dashboard-priority-up ()
+  "Cycle priority up (none→C→B→A→none) for reminder at point; push to Apple."
+  (interactive)
+  (org-apple-reminders--dashboard-cycle-priority 'up))
+
+(defun org-apple-reminders-dashboard-priority-down ()
+  "Cycle priority down (none→A→B→C→none) for reminder at point; push to Apple."
+  (interactive)
+  (org-apple-reminders--dashboard-cycle-priority 'down))
+
+(defun org-apple-reminders--dashboard-cycle-priority (direction)
+  "Cycle DIRECTION (\\='up or \\='down) priority for reminder at point."
+  (let ((loc (org-apple-reminders--loc-at-point)))
+    (unless loc (user-error "No reminder at point"))
+    (let* ((pchar (nth 3 (org-heading-components)))
+           (new-char
+            (if (eq direction 'up)
+                (cond ((null pchar) ?C) ((eql pchar ?C) ?B)
+                      ((eql pchar ?B) ?A) (t nil))
+              (cond ((null pchar) ?A) ((eql pchar ?A) ?B)
+                    ((eql pchar ?B) ?C) (t nil))))
+           (prio (cond ((eql new-char ?A) 1) ((eql new-char ?B) 5)
+                       ((eql new-char ?C) 9) (t 0))))
+      (let ((inhibit-read-only t)
+            (org-apple-reminders--syncing t))
+        (org-priority (or new-char 'remove)))
+      (when-let ((item (org-apple-reminders--dashboard-find-cache-item loc)))
+        (setf (alist-get 'priority item) prio))
+      (org-apple-reminders--jxa-async
+       (format "var r=Application('Reminders').lists.byName(%s).reminders.byId(%s);r.priority=%d;"
+               (json-encode (car loc)) (json-encode (cdr loc)) prio)
+       (lambda (_) (message "Reminders: priority updated."))))))
+
+(defun org-apple-reminders-dashboard-set-due (arg)
+  "Set due date/time for reminder at point; push to Apple.
+With prefix ARG, clear the due date instead."
+  (interactive "P")
+  (let ((loc (org-apple-reminders--loc-at-point)))
+    (unless loc (user-error "No reminder at point"))
+    (let* ((due
+            (unless arg
+              (let ((s (org-read-date t nil nil "Due (time optional, e.g. 2026-06-01 09:00): ")))
+                (if (string-match-p " [0-9][0-9]:[0-9][0-9]$" s)
+                    (replace-regexp-in-string " " "T" s)
+                  s))))
+           (item (org-apple-reminders--dashboard-find-cache-item loc)))
+      (let ((inhibit-read-only t))
+        (if due
+            (org-add-planning-info 'deadline (org-apple-reminders--format-due due))
+          (org-add-planning-info nil nil 'deadline)))
+      (when item (setf (alist-get 'due item) due))
+      (org-apple-reminders--update-in-apple
+       (car loc) (cdr loc)
+       `((title    . ,(or (and item (alist-get 'title    item)) ""))
+         (notes    . ,(or (and item (alist-get 'notes    item)) ""))
+         (priority . ,(or (and item (alist-get 'priority item)) 0))
+         (due      . ,due)
+         (flagged  . ,(and item (eq (alist-get 'flagged item) t))))
+       (lambda (_) (message "Reminders: due date %s." (if due "updated" "cleared")))))))
 
 ;;; Save hook
 

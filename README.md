@@ -107,8 +107,11 @@ Opens the `*Apple Reminders*` buffer showing all lists and items. Dashboard key 
 |---|---|
 | `g` | Refresh from Apple |
 | `t` / `C-c C-t` | Complete reminder at point |
+| `u` | Reopen (un-complete) reminder |
 | `d` | Delete reminder from Apple and org |
 | `e` | Jump to heading in reminders.org |
+| `S-<up>` / `S-<down>` | Cycle priority up / down (A→B→C) |
+| `D` / `C-c C-d` | Set or clear due date (with optional time); `C-u D` clears |
 | `h` | Toggle visibility of completed items |
 | `q` | Quit window |
 
