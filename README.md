@@ -112,6 +112,7 @@ Opens the `*Apple Reminders*` buffer showing all lists and items. Dashboard key 
 | `e` | Jump to heading in reminders.org |
 | `S-<up>` / `S-<down>` | Cycle priority up / down (A→B→C) |
 | `D` / `C-c C-d` | Set or clear due date (with optional time); `C-u D` clears |
+| `S-<right>` / `S-<left>` | Cycle TODO state forward / backward; pushes completion change to Apple |
 | `h` | Toggle visibility of completed items |
 | `q` | Quit window |
 

@@ -29,7 +29,8 @@ _(nothing in active development)_
 
 - **Dashboard interactive actions** — reopen (`u`), priority cycling
   (`S-<up>` / `S-<down>`), set/clear due date (`D` / `C-c C-d`, `C-u` to
-  clear). All push to Apple immediately via JXA. ✓ Merged to `main` (v1.4).
+  clear), TODO state cycling (`S-<right>` / `S-<left>`). All push to Apple
+  immediately via JXA. ✓ Merged to `main` (v1.4–v1.5).
 
 ## Planned
 

@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Denis Butic
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
-;; Version: 1.4
+;; Version: 1.5
 ;; Package-Requires: ((emacs "27.1") (org "9.3") (cl-lib "0.5"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -1013,6 +1013,8 @@ Conflict resolution:
         (define-key map (kbd "S-<down>")  #'org-apple-reminders-dashboard-priority-down)
         (define-key map (kbd "D")         #'org-apple-reminders-dashboard-set-due)
         (define-key map (kbd "C-c C-d")   #'org-apple-reminders-dashboard-set-due)
+        (define-key map (kbd "S-<right>") #'org-apple-reminders-dashboard-todo-right)
+        (define-key map (kbd "S-<left>")  #'org-apple-reminders-dashboard-todo-left)
         (use-local-map map)))
     (unless (get-buffer-window buf) (switch-to-buffer buf))))
 
@@ -1203,6 +1205,37 @@ With prefix ARG, clear the due date instead."
          (due      . ,due)
          (flagged  . ,(and item (eq (alist-get 'flagged item) t))))
        (lambda (_) (message "Reminders: due date %s." (if due "updated" "cleared")))))))
+
+(defun org-apple-reminders-dashboard-todo-right ()
+  "Cycle TODO state forward for reminder at point; push completion change to Apple."
+  (interactive)
+  (org-apple-reminders--dashboard-cycle-state 'right))
+
+(defun org-apple-reminders-dashboard-todo-left ()
+  "Cycle TODO state backward for reminder at point; push completion change to Apple."
+  (interactive)
+  (org-apple-reminders--dashboard-cycle-state 'left))
+
+(defun org-apple-reminders--dashboard-cycle-state (direction)
+  "Cycle TODO state in DIRECTION (\\='right or \\='left) and push completion to Apple."
+  (let ((loc (org-apple-reminders--loc-at-point)))
+    (unless loc (user-error "No reminder at point"))
+    (let* ((old-state (org-get-todo-state))
+           (was-done  (member old-state org-done-keywords)))
+      (let ((inhibit-read-only t)
+            (org-apple-reminders--syncing t))
+        (org-todo direction))
+      (let* ((new-state (org-get-todo-state))
+             (is-done   (member new-state org-done-keywords)))
+        (message "Reminders: state → %s." (or new-state "none"))
+        (unless (equal (not was-done) (not is-done))
+          (org-apple-reminders--jxa-async
+           (format "Application('Reminders').lists.byName(%s).reminders.byId(%s).completed=%s;"
+                   (json-encode (car loc)) (json-encode (cdr loc))
+                   (if is-done "true" "false"))
+           (lambda (_)
+             (when org-apple-reminders--cache
+               (org-apple-reminders-dashboard--render org-apple-reminders--cache)))))))))
 
 ;;; Save hook
 
