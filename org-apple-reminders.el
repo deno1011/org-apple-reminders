@@ -194,10 +194,11 @@ CALLBACK receives the stdout string when the process exits."
 
 (defun org-apple-reminders-lists ()
   "Return a list of Apple Reminders list names."
-  (split-string
-   (org-apple-reminders--jxa-run
-    "JSON.stringify(Application('Reminders').lists.name())")
-   nil t "[\"\n\\[\\],]"))
+  (let ((raw (org-apple-reminders--jxa-run
+              "JSON.stringify(Application('Reminders').lists.name())")))
+    (condition-case nil
+        (append (json-parse-string raw :array-type 'vector) nil)
+      (error nil))))
 
 (defun org-apple-reminders-show-lists ()
   "Display all Apple Reminders lists in the echo area."
