@@ -244,14 +244,34 @@ CALLBACK receives the stdout string when the process exits."
 ;;; Field helpers
 
 (defun org-apple-reminders--extract-notes ()
-  "Extract body text from org heading, stripping LOGBOOK and org metadata."
+  "Extract body text from org heading, stripping LOGBOOK and per-line leading whitespace."
   (save-excursion
     (org-back-to-heading t)
     (let* ((start (save-excursion (org-end-of-meta-data t) (point)))
            (end   (save-excursion (org-end-of-subtree t) (point)))
-           (raw   (buffer-substring-no-properties start end)))
-      (string-trim
-       (replace-regexp-in-string ":LOGBOOK:\\(?:.\\|\n\\)*?:END:\n?" "" raw)))))
+           (raw   (buffer-substring-no-properties start end))
+           (no-logbook (string-trim
+                        (replace-regexp-in-string
+                         ":LOGBOOK:\\(?:.\\|\n\\)*?:END:\n?" "" raw))))
+      (if (string-empty-p no-logbook)
+          ""
+        (string-join
+         (mapcar (lambda (line)
+                   (replace-regexp-in-string "^[[:space:]]+" "" line))
+                 (split-string no-logbook "\n"))
+         "\n")))))
+
+(defun org-apple-reminders--set-org-notes (notes)
+  "Replace body text of the org entry at point with NOTES string."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((start (save-excursion (org-end-of-meta-data t) (point)))
+          (end   (save-excursion (org-end-of-subtree t) (point))))
+      (delete-region start end)
+      (goto-char start)
+      (unless (or (null notes) (string-empty-p notes))
+        (dolist (line (split-string notes "\n"))
+          (insert (format "   %s\n" line)))))))
 
 (defun org-apple-reminders--org-item-values ()
   "Return alist of org heading values that map to Apple Reminders fields."
@@ -718,6 +738,7 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                       (and (stringp d) (not (string-empty-p d)) d)))
                                           (a-flagged (eq (alist-get 'flagged apple) t))
                                           (a-title  (or (alist-get 'title apple) ""))
+                                          (a-notes  (or (alist-get 'notes apple) ""))
                                           (p-char   (nth 3 (org-heading-components)))
                                           (o-prio   (cond ((eql p-char ?A) 1)
                                                           ((eql p-char ?B) 5)
@@ -730,14 +751,16 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                           (o-flagged (not (null (member "flagged" (org-get-tags nil t)))))
                                           (o-title  (replace-regexp-in-string
                                                      "^★ " "" (org-get-heading t t t t)))
+                                          (o-notes  (org-apple-reminders--extract-notes))
                                           (changed  (or (/= a-prio o-prio)
                                                         (not (equal a-due o-due))
                                                         (not (eq a-flagged o-flagged))
-                                                        (not (equal a-title o-title)))))
+                                                        (not (equal a-title o-title))
+                                                        (not (equal a-notes o-notes)))))
                                      (when changed
                                        (push (list (point-marker) rlist
                                                    a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                                                   a-title o-title)
+                                                   a-title o-title a-notes o-notes)
                                              apple-updates)))
                                  (let* ((vals (org-apple-reminders--org-item-values))
                                         (needs-push
@@ -774,7 +797,7 @@ New Apple items not linked in any known file → pulled into sync-file only."
                           (puthash new-id sync-file id-index)
                           (setq n-pushed (1+ n-pushed))))))
                   (dolist (upd (nreverse apple-updates))
-                    (cl-destructuring-bind (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title) upd
+                    (cl-destructuring-bind (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title a-notes o-notes) upd
                       (goto-char m) (push (point-marker) changed-positions)
                       (unless (equal a-title o-title)
                         (org-back-to-heading t)
@@ -796,6 +819,8 @@ New Apple items not linked in any known file → pulled into sync-file only."
                           (org-add-planning-info nil nil 'deadline)))
                       (unless (eq a-flagged o-flagged)
                         (org-toggle-tag "flagged" (if a-flagged 'on 'off)))
+                      (unless (equal a-notes o-notes)
+                        (org-apple-reminders--set-org-notes a-notes))
                       (when (stringp a-mod) (org-set-property "REMINDER_APPLE_MOD" a-mod))
                       (setq n-updated (1+ n-updated))
                       (set-marker m nil)))
@@ -926,23 +951,26 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                         (match-string 1 dl))))
                                          (o-flagged (not (null (member "flagged" (org-get-tags nil t)))))
                                          (a-title   (or (alist-get 'title aitem) ""))
+                                         (a-notes   (or (alist-get 'notes aitem) ""))
                                          (o-title   (replace-regexp-in-string
                                                      "^★ " "" (org-get-heading t t t t)))
+                                         (o-notes   (org-apple-reminders--extract-notes))
                                          (changed   (or (/= a-prio o-prio)
                                                         (not (equal a-due o-due))
                                                         (not (eq a-flagged o-flagged))
-                                                        (not (equal a-title o-title))))
+                                                        (not (equal a-title o-title))
+                                                        (not (equal a-notes o-notes))))
                                          (last-known (org-apple-reminders--last-known-mod))
                                          (apple-changed (and a-mod (or (null last-known)
                                                                         (string> a-mod last-known)))))
                                     (when (and changed apple-changed)
                                       (push (list (point-marker)
                                                   a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                                                  a-title o-title)
+                                                  a-title o-title a-notes o-notes)
                                             field-updates))))))
                             nil nil)
                            (dolist (upd (nreverse field-updates))
-                             (cl-destructuring-bind (m a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title) upd
+                             (cl-destructuring-bind (m a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title a-notes o-notes) upd
                                (goto-char m)
                                (unless (equal a-title o-title)
                                  (org-back-to-heading t)
@@ -964,6 +992,8 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                    (org-add-planning-info nil nil 'deadline)))
                                (unless (eq a-flagged o-flagged)
                                  (org-toggle-tag "flagged" (if a-flagged 'on 'off)))
+                               (unless (equal a-notes o-notes)
+                                 (org-apple-reminders--set-org-notes a-notes))
                                (when (stringp a-mod)
                                  (org-set-property "REMINDER_APPLE_MOD" a-mod))
                                (set-marker m nil)))
