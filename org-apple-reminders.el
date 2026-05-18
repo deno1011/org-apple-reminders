@@ -133,15 +133,31 @@ and .org files from `org-agenda-files'."
                     org-agenda-files)))))
 
 (defun org-apple-reminders--build-id-index ()
-  "Scan all known org files; return hash REMINDER_ID → expanded file path."
-  (let ((ht (make-hash-table :test #'equal)))
-    (dolist (file (org-apple-reminders--known-files))
+  "Scan all known org files; return hash REMINDER_ID → expanded file path.
+Also scans open org buffers visiting files outside the known-files list,
+so that headings pushed via `org-apple-reminders-push-heading' in
+unregistered files are not re-inserted into the sync file."
+  (let ((ht (make-hash-table :test #'equal))
+        (known (org-apple-reminders--known-files)))
+    (dolist (file known)
       (when (file-exists-p file)
         (with-current-buffer (find-file-noselect file)
           (org-map-entries
            (lambda ()
              (when-let (id (org-entry-get nil "REMINDER_ID"))
                (puthash id (expand-file-name file) ht)))
+           nil nil))))
+    ;; Also catch open buffers not yet in known-files (e.g. just push-heading'd)
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (buffer-file-name)
+                   (derived-mode-p 'org-mode)
+                   (not (member (expand-file-name (buffer-file-name)) known))
+                   (org-apple-reminders--buffer-has-reminders-p))
+          (org-map-entries
+           (lambda ()
+             (when-let (id (org-entry-get nil "REMINDER_ID"))
+               (puthash id (expand-file-name (buffer-file-name)) ht)))
            nil nil))))
     ht))
 
@@ -435,7 +451,18 @@ DUE-DATE is an ISO date string like \"2025-12-31\"."
     (when new-id
       (org-set-property "REMINDER_ID"   new-id)
       (org-set-property "REMINDER_LIST" list)
-      (message "Pushed to Apple Reminders [%s]: %s" list (alist-get 'title vals)))))
+      ;; Register this file so future syncs find it and don't re-insert
+      ;; the entry into reminders.org.
+      (let ((registered ""))
+        (when (buffer-file-name)
+          (let ((this-file (expand-file-name (buffer-file-name))))
+            (unless (member this-file (org-apple-reminders--known-files))
+              (customize-save-variable
+               'org-apple-reminders-extra-files
+               (cons (buffer-file-name) org-apple-reminders-extra-files))
+              (setq registered (format "  [registered %s]" (buffer-file-name))))))
+        (message "Pushed to Apple Reminders [%s]: %s%s"
+                 list (alist-get 'title vals) registered)))))
 
 ;;;###autoload
 (defun org-apple-reminders-delete-reminder ()
