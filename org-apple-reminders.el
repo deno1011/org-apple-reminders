@@ -442,7 +442,7 @@ DUE-DATE is an ISO date string like \"2025-12-31\"."
                        (org-apple-reminders-lists)))
           (default (or (org-entry-get nil "REMINDER_LIST")
                        (car lists))))
-     (list (completing-read "List: " lists nil t default))))
+     (list (completing-read "List: " lists nil t nil nil default))))
   (unless (derived-mode-p 'org-mode)
     (user-error "Not in an org-mode buffer"))
   (let* ((list (or list-name (org-apple-reminders--default-list)))
