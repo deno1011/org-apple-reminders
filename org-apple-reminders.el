@@ -410,12 +410,11 @@ DUE-DATE is an ISO date string like \"2025-12-31\"."
 ;;; Org heading → Apple push
 
 (defun org-apple-reminders-push-heading (&optional list-name)
-  "Push org heading at point to Apple Reminders.
-With prefix arg, prompt for list name."
+  "Push org heading at point to Apple Reminders, prompting for the target list."
   (interactive
-   (when current-prefix-arg
-     (list (completing-read "List: " (org-apple-reminders-lists) nil nil
-                            (org-apple-reminders--default-list)))))
+   (list (completing-read "List: " (org-apple-reminders-lists) nil nil
+                          (or (org-entry-get nil "REMINDER_LIST")
+                              (org-apple-reminders--default-list)))))
   (unless (derived-mode-p 'org-mode)
     (user-error "Not in an org-mode buffer"))
   (let* ((list (or list-name (org-apple-reminders--default-list)))
