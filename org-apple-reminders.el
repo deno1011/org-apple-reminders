@@ -992,7 +992,10 @@ Conflict resolution:
                 (insert "  /No open reminders./\n\n"))
                (t
                 (dolist (item items)
-                  (org-apple-reminders--insert-item item lname "TODO"))
+                  (unless (cl-find (alist-get 'id item) done
+                                   :key (lambda (e) (alist-get 'id e))
+                                   :test #'string=)
+                    (org-apple-reminders--insert-item item lname "TODO")))
                 (when (and done org-apple-reminders--show-done)
                   (dolist (item done)
                     (org-apple-reminders--insert-item item lname "DONE"))))))))
