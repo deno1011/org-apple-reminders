@@ -671,6 +671,7 @@ New Apple items not linked in any known file → pulled into sync-file only."
                          ht))
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0))
+    (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
         (insert "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n")))
@@ -727,7 +728,8 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                                     "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" dl))
                                                         (match-string 1 dl))))
                                           (o-flagged (not (null (member "flagged" (org-get-tags nil t)))))
-                                          (o-title  (org-get-heading t t t t))
+                                          (o-title  (replace-regexp-in-string
+                                                     "^★ " "" (org-get-heading t t t t)))
                                           (changed  (or (/= a-prio o-prio)
                                                         (not (equal a-due o-due))
                                                         (not (eq a-flagged o-flagged))
@@ -837,6 +839,11 @@ New Apple items not linked in any known file → pulled into sync-file only."
                         (org-apple-reminders--goto-list-heading lname)
                         (push (point-marker) changed-positions)
                         (org-apple-reminders--insert-org-heading item lname)
+                        (save-excursion
+                          (org-back-to-heading t)
+                          (let ((md (alist-get 'modDate item)))
+                            (when (stringp md)
+                              (org-set-property "REMINDER_APPLE_MOD" md))))
                         (puthash id sync-file id-index)
                         (setq n-pulled (1+ n-pulled))))))))
             (when changed-positions
@@ -919,7 +926,8 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                         (match-string 1 dl))))
                                          (o-flagged (not (null (member "flagged" (org-get-tags nil t)))))
                                          (a-title   (or (alist-get 'title aitem) ""))
-                                         (o-title   (org-get-heading t t t t))
+                                         (o-title   (replace-regexp-in-string
+                                                     "^★ " "" (org-get-heading t t t t)))
                                          (changed   (or (/= a-prio o-prio)
                                                         (not (equal a-due o-due))
                                                         (not (eq a-flagged o-flagged))
