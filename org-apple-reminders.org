@@ -80,8 +80,9 @@ generated file.
 ;; Copyright (C) 2025 Denis Butic
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
-;; Version: 1.9
-;; Package-Requires: ((emacs "27.1") (org "9.3") (cl-lib "0.5"))
+;; Assisted-by: Claude:claude-opus-4-7
+;; Version: 1.9.1
+;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -121,6 +122,16 @@ generated file.
 ;; See the README for full installation instructions and key bindings.
 
 ;;; Code:
+
+;; Forward declarations for the byte-compiler.  These functions and
+;; variables come from libraries listed in `Package-Requires' (org-agenda
+;; and org-capture ship with org) and are loaded lazily by
+;; `org-apple-reminders-setup'; `org-state' is the dynamic variable bound
+;; by `org-after-todo-state-change-hook'.
+(declare-function org-agenda-redo "org-agenda" (&optional all))
+(defvar org-state)
+(defvar org-capture-templates)
+(defvar org-agenda-custom-commands)
 
 (require 'cl-lib)
 (require 'org)
@@ -191,7 +202,7 @@ nil means use the first list returned by Apple Reminders."
   :group 'org-apple-reminders)
 
 (defcustom org-apple-reminders-agenda-file nil
-  "Separate auto-generated org file for org-agenda integration.
+  "Separate auto-generated org file for `org-agenda' integration.
 nil (default) means use `org-apple-reminders-sync-file' for the agenda.
 Set to a file path only if you want a separate read-only agenda file."
   :type '(choice (const :tag "Use sync file (default)" nil) file)
@@ -239,7 +250,7 @@ Do not edit by hand — use `org-apple-reminders-set-included-lists'."
 (defcustom org-apple-reminders-extra-files nil
   "Additional org files scanned for linked Apple Reminders headings.
 These files may contain REMINDER_ID headings alongside arbitrary content
-(Babel blocks, LaTeX, prose, etc.).  Together with `org-agenda-files'
+\(Babel blocks, LaTeX, prose, etc.).  Together with `org-agenda-files'
 they form the full search space for existing reminder links.
 
 New Apple items that are not linked in any known file land in
@@ -341,7 +352,7 @@ already contains at least one REMINDER_ID (so files linked via
     ht))
 
 (defun org-apple-reminders--buffer-has-reminders-p ()
-  "Return non-nil if the current buffer contains at least one REMINDER_ID."
+  "Return non-nil if any REMINDER_ID heading is present in this buffer."
   (save-excursion
     (goto-char (point-min))
     (re-search-forward ":REMINDER_ID:" nil t)))
@@ -567,7 +578,8 @@ priority, =:flagged:= tag and notes into the alist used by every push.
 ;;; Field helpers
 
 (defun org-apple-reminders--extract-notes ()
-  "Extract body text from org heading, stripping LOGBOOK and per-line leading whitespace."
+  "Extract body text from org heading at point.
+Strips LOGBOOK drawers and per-line leading whitespace."
   (save-excursion
     (org-back-to-heading t)
     (let* ((start (save-excursion (org-end-of-meta-data t) (point)))
@@ -675,7 +687,8 @@ app.lists().forEach(function(l){
   out.push({list:l.name(),items:items});
 });
 JSON.stringify(out);"
-  "JXA script returning all Reminders as JSON.  Uses batch property fetch for speed.")
+  "JXA script returning all Reminders as JSON.
+Uses batch property fetch for speed.")
 
 (defun org-apple-reminders--complete-in-apple (list-name id)
   "Mark Apple reminder ID in LIST-NAME as completed (async)."
@@ -717,7 +730,8 @@ JSON.stringify(newId);"
 
 (defun org-apple-reminders--update-in-apple (list-name id vals &optional callback)
   "Push VALS alist to Apple reminder ID in LIST-NAME.
-Without CALLBACK: synchronous; returns Apple's post-push modificationDate or nil.
+Without CALLBACK: synchronous; returns Apple's modificationDate after the
+push, or nil.
 With CALLBACK: async; CALLBACK receives the modificationDate string."
   (let* ((title   (alist-get 'title    vals ""))
          (notes   (alist-get 'notes    vals ""))
@@ -982,7 +996,10 @@ structure is left intact.
 
 In a region, only linked reminders and open TODO/NEXT/WAITING tasks are
 processed; other headings are skipped.  The chosen list is created in Apple
-Reminders if it does not exist yet."
+Reminders if it does not exist yet.
+
+Non-interactively, LIST-NAME is the target Apple Reminders list; BEG and END
+delimit the region to process (both nil ⇒ act on the heading at point)."
   (interactive
    (let ((lists (or (org-apple-reminders--cached-list-names)
                     (org-apple-reminders-lists))))
@@ -1083,7 +1100,10 @@ Also set REMINDER_NOSYNC so the heading is never pushed back to Apple."
 With an active region, delete every reminder in the region instead.  A
 single-heading call removes the heading from `org-apple-reminders-sync-file'
 \(it works from reminders.org or any org buffer with a REMINDER_ID); a region
-call removes the selected headings from the current buffer."
+call removes the selected headings from the current buffer.
+
+Non-interactively, BEG and END delimit the region to act on (both nil ⇒ act
+on the heading at point)."
   (interactive
    (list (and (use-region-p) (region-beginning))
          (and (use-region-p) (region-end))))
@@ -1144,7 +1164,10 @@ Each heading stays in the org file as an ordinary TODO; its REMINDER_ID,
 REMINDER_LIST and modification-timestamp properties are removed and a
 REMINDER_NOSYNC property is set so it is never pushed back to Apple.  Use
 this to stop syncing a task without losing it.  Re-link it later with
-`org-apple-reminders-push-heading'."
+`org-apple-reminders-push-heading'.
+
+Non-interactively, BEG and END delimit the region to act on (both nil ⇒ act
+on the heading at point)."
   (interactive
    (list (and (use-region-p) (region-beginning))
          (and (use-region-p) (region-end))))
@@ -1385,7 +1408,8 @@ New-item creation is synchronous so the returned id can be stamped back.
 
 (defun org-apple-reminders--push-to-apple ()
   "Push changed org entries to Apple.  New items get REMINDER_ID stamped back.
-Auto-creation from unlinked headings only happens in `org-apple-reminders-sync-file';
+Auto-creation from unlinked headings only happens in the value of
+`org-apple-reminders-sync-file';
 other linked files only push updates to already-stamped headings."
   (let* ((n-new 0) (n-updated 0)
          (is-sync-file
@@ -1946,7 +1970,7 @@ saves.
 ;;; Save hook
 
 (defun org-apple-reminders--on-save ()
-  "Push changes to Apple for any known org file containing REMINDER_ID entries."
+  "Push pending edits to Apple for any known org file with REMINDER_ID entries."
   (when (and (buffer-file-name)
              (not org-apple-reminders--syncing)
              (derived-mode-p 'org-mode)
@@ -2144,13 +2168,14 @@ Binds `org-apple-reminders-command-map' under
   (when org-apple-reminders-keymap-prefix
     (global-set-key (kbd org-apple-reminders-keymap-prefix)
                     org-apple-reminders-command-map))
+  ;; Eagerly load org-agenda and org-capture (both ship with org, which is
+  ;; already a Package-Requires dependency).  Avoiding `with-eval-after-load'
+  ;; keeps the package free of behaviour that should live in user config.
+  (require 'org-agenda)
+  (require 'org-capture)
   (org-apple-reminders--ensure-agenda-files)
-  (with-eval-after-load 'org-agenda
-    (org-apple-reminders--ensure-agenda-files))
   (add-hook 'org-agenda-mode-hook #'org-apple-reminders--ensure-agenda-files)
-  (if (featurep 'org-capture)
-      (org-apple-reminders--setup-capture)
-    (with-eval-after-load 'org-capture (org-apple-reminders--setup-capture)))
+  (org-apple-reminders--setup-capture)
   (org-apple-reminders--start-sync-timer)
   (run-with-idle-timer 3 nil #'org-apple-reminders--background-pull))
 

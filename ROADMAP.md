@@ -9,6 +9,17 @@ _(nothing in active development)_
 
 ## Done
 
+- **MELPA hygiene** (v1.9.1) — make the package land cleanly with MELPA's
+  reviewers: drop the spurious `(cl-lib "0.5")` dependency (`cl-lib` is
+  built-in on Emacs ≥ 24.3); replace `with-eval-after-load` in
+  `org-apple-reminders-setup` with explicit `(require 'org-agenda)` and
+  `(require 'org-capture)`; add `defvar`/`declare-function` forward
+  declarations for free variables and `org-agenda-redo`; rewrap long
+  docstrings and quote `` `org-agenda' `` per `checkdoc`; add the
+  MELPA-required `Assisted-by: Claude:claude-opus-4-7` header line per
+  MELPA's AI-attribution policy. Byte-compile and `package-lint` now both
+  clean. ✓ Merged to `main` (v1.9.1).
+
 - **Included-lists fully repopulate `reminders.org`** — `C-c r i` now queries
   Apple live, so lists created since the last sync can be picked. A full sync
   (`C-c r R`) makes `reminders.org` mirror exactly the current selection:
