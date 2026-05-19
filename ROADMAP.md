@@ -9,6 +9,22 @@ _(nothing in active development)_
 
 ## Done
 
+- **Included-lists fully repopulate `reminders.org`** — `C-c r i` now queries
+  Apple live, so lists created since the last sync can be picked. A full sync
+  (`C-c r R`) makes `reminders.org` mirror exactly the current selection:
+  sections for de-selected lists are pruned (pure-reminder sections only —
+  hand-written content is left alone), and every included list gets a
+  `* List` section even when it is empty. Progress cookies `[N/M]` are
+  recalculated after the pull so freshly synced lists show correct counts
+  immediately. ✓ Merged to `main` (v1.9).
+
+- **Region delete / remove** — `org-apple-reminders-delete-reminder`
+  (`C-c r D`) and `org-apple-reminders-remove-from-apple` (`C-c r d`) now act
+  on every reminder in an active region, not just the one at point, behind a
+  single confirmation prompt. The minibuffer-only `org-apple-reminders-add`
+  command was removed — `push-heading` (`C-c r p`) and the capture template
+  already cover quick-add. ✓ Merged to `main` (v1.9).
+
 - **Push a selection of headings** — `org-apple-reminders-push-heading`
   (`C-c r p`, also `C-c r m`) now works on an active region: every heading in
   the selection is processed in one step — unlinked TODOs are created, linked

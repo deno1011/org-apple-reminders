@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Denis Butic
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
-;; Version: 1.8
+;; Version: 1.9
 ;; Package-Requires: ((emacs "27.1") (org "9.3") (cl-lib "0.5"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -330,8 +330,11 @@ When `org-apple-reminders-included-lists-prefer-config' is non-nil the
 config value stays authoritative — the choice is still saved but does
 not take effect until that option is set back to nil."
   (interactive)
-  (let* ((all     (or (org-apple-reminders--cached-list-names)
-                      (org-apple-reminders-lists)))
+  ;; Query Apple for the live list names — the cache can be stale and would
+  ;; then hide lists created since the last sync (so they could never be
+  ;; picked).  Fall back to the cache only if the query fails.
+  (let* ((all     (or (org-apple-reminders-lists)
+                      (org-apple-reminders--cached-list-names)))
          (current (let ((e (org-apple-reminders--effective-included-lists)))
                     (and (listp e) e)))
          (picked  (delete "" (completing-read-multiple
@@ -553,27 +556,6 @@ JSON.stringify(true);"
      (omod omod)
      (t nil))))
 
-;;; Interactive: add a reminder
-
-(defun org-apple-reminders-add (title &optional list-name due-date notes)
-  "Add a reminder TITLE to LIST-NAME with optional DUE-DATE and NOTES.
-DUE-DATE is an ISO date string like \"2025-12-31\"."
-  (interactive
-   (let ((lists (or (org-apple-reminders--cached-list-names)
-                    (org-apple-reminders-lists))))
-     (list (read-string "Reminder: ")
-           (completing-read "List: " lists nil t)
-           (read-string "Due (optional, e.g. 2025-12-31): ")
-           nil)))
-  (let* ((list (or list-name (org-apple-reminders--default-list)))
-         (vals `((title . ,title) (notes . ,(or notes ""))
-                 (priority . 0) (flagged . nil)
-                 (due . ,(and due-date (not (string-empty-p due-date)) due-date)))))
-    (org-apple-reminders--create-in-apple list vals)
-    (message "Added to Apple Reminders [%s]: %s%s" list title
-             (if (and due-date (not (string-empty-p due-date)))
-                 (format " (due %s)" due-date) ""))))
-
 ;;; Org heading → Apple push
 
 (defun org-apple-reminders--register-current-file ()
@@ -776,80 +758,157 @@ Reminders if it does not exist yet."
                  target title
                  (if reg (format "  [registered %s]" reg) ""))))))
 
-;;;###autoload
-(defun org-apple-reminders-delete-reminder ()
-  "Delete the reminder at point from Apple Reminders and from reminders.org.
-Works in reminders.org directly or from any org buffer with REMINDER_ID."
-  (interactive)
+(defun org-apple-reminders--unlink-apple-at-point ()
+  "Delete the Apple reminder for the heading at point and drop it from cache.
+Return the (LIST . ID) cons, or nil when the heading carries no REMINDER_ID."
   (let ((loc (org-apple-reminders--loc-at-point)))
-    (unless loc (user-error "No reminder at point"))
-    (let* ((lname (car loc))
-           (id    (cdr loc))
-           (title (save-excursion
-                    (org-back-to-heading t)
-                    (org-get-heading t t t t))))
-      (unless (yes-or-no-p (format "Delete \"%s\" from Apple Reminders and org? " title))
-        (user-error "Aborted"))
-      (org-apple-reminders--delete-in-apple lname id)
-      (when-let (entry (cl-find lname org-apple-reminders--cache
+    (when loc
+      (org-apple-reminders--delete-in-apple (car loc) (cdr loc))
+      (when-let (entry (cl-find (car loc) org-apple-reminders--cache
                                 :key (lambda (e) (alist-get 'list e))
                                 :test #'string=))
         (let ((cell (assq 'items entry)))
           (when cell
-            (setcdr cell (cl-remove id (cdr cell)
+            (setcdr cell (cl-remove (cdr loc) (cdr cell)
                                     :key (lambda (e) (alist-get 'id e))
                                     :test #'string=)))))
-      (let ((file (expand-file-name org-apple-reminders-sync-file)))
-        (when (file-exists-p file)
-          (with-current-buffer (find-file-noselect file)
-            (let ((org-apple-reminders--syncing t))
-              (when-let (pos (org-find-property "REMINDER_ID" id))
-                (goto-char pos)
-                (org-back-to-heading t)
-                (let ((beg (point))
-                      (end (save-excursion (org-end-of-subtree t t) (point))))
-                  (delete-region beg end))
-                (save-buffer))))))
-      (message "Deleted: %s" title))))
+      loc)))
+
+(defun org-apple-reminders--strip-link-properties ()
+  "Remove the REMINDER_* link properties from the heading at point.
+Also set REMINDER_NOSYNC so the heading is never pushed back to Apple."
+  (save-excursion
+    (org-back-to-heading t)
+    (dolist (prop '("REMINDER_ID" "REMINDER_LIST"
+                    "REMINDER_APPLE_MOD" "REMINDER_ORG_MOD"))
+      (org-entry-delete nil prop))
+    (org-set-property "REMINDER_NOSYNC" "t")))
+
+(defun org-apple-reminders--region-reminder-markers (beg end)
+  "Return markers for every heading between BEG and END that has a REMINDER_ID."
+  (let (markers)
+    (save-excursion
+      (goto-char beg)
+      (if (org-before-first-heading-p)
+          (outline-next-heading)
+        (org-back-to-heading t))
+      (while (and (not (eobp)) (<= (point) end))
+        (when (org-entry-get nil "REMINDER_ID")
+          (push (point-marker) markers))
+        (outline-next-heading)))
+    (nreverse markers)))
 
 ;;;###autoload
-(defun org-apple-reminders-remove-from-apple ()
+(defun org-apple-reminders-delete-reminder (&optional beg end)
+  "Delete the reminder at point from Apple Reminders and from the org file.
+
+With an active region, delete every reminder in the region instead.  A
+single-heading call removes the heading from `org-apple-reminders-sync-file'
+\(it works from reminders.org or any org buffer with a REMINDER_ID); a region
+call removes the selected headings from the current buffer."
+  (interactive
+   (list (and (use-region-p) (region-beginning))
+         (and (use-region-p) (region-end))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not in an org-mode buffer"))
+  (if (and beg end)
+      ;; --- Region: delete every selected reminder ---
+      (let ((markers (org-apple-reminders--region-reminder-markers beg end)))
+        (unless markers
+          (user-error "No reminders in the selected region"))
+        (unless (yes-or-no-p
+                 (format "Delete %d reminder%s from Apple Reminders and org? "
+                         (length markers)
+                         (if (= (length markers) 1) "" "s")))
+          (user-error "Aborted"))
+        (let ((org-apple-reminders--syncing t) (n 0))
+          (dolist (m markers)
+            (when (marker-buffer m)
+              (save-excursion
+                (goto-char m)
+                (when (org-apple-reminders--unlink-apple-at-point)
+                  (org-back-to-heading t)
+                  (delete-region (point)
+                                 (save-excursion
+                                   (org-end-of-subtree t t) (point)))
+                  (setq n (1+ n)))))
+            (set-marker m nil))
+          (when (and (buffer-file-name) (buffer-modified-p)) (save-buffer))
+          (message "Deleted %d reminder%s" n (if (= n 1) "" "s"))))
+    ;; --- Single heading ---
+    (let ((loc (org-apple-reminders--loc-at-point)))
+      (unless loc (user-error "No reminder at point"))
+      (let ((title (save-excursion (org-back-to-heading t)
+                                   (org-get-heading t t t t))))
+        (unless (yes-or-no-p
+                 (format "Delete \"%s\" from Apple Reminders and org? " title))
+          (user-error "Aborted"))
+        (org-apple-reminders--unlink-apple-at-point)
+        (let ((file (expand-file-name org-apple-reminders-sync-file)))
+          (when (file-exists-p file)
+            (with-current-buffer (find-file-noselect file)
+              (let ((org-apple-reminders--syncing t))
+                (when-let (pos (org-find-property "REMINDER_ID" (cdr loc)))
+                  (goto-char pos)
+                  (org-back-to-heading t)
+                  (delete-region (point)
+                                 (save-excursion
+                                   (org-end-of-subtree t t) (point)))
+                  (save-buffer))))))
+        (message "Deleted: %s" title)))))
+
+;;;###autoload
+(defun org-apple-reminders-remove-from-apple (&optional beg end)
   "Delete the reminder at point from Apple Reminders but keep the org heading.
-The heading stays in the org file as an ordinary TODO; its REMINDER_ID,
+
+With an active region, do this for every reminder in the region instead.
+Each heading stays in the org file as an ordinary TODO; its REMINDER_ID,
 REMINDER_LIST and modification-timestamp properties are removed and a
-REMINDER_NOSYNC property is set so the heading is never pushed back to
-Apple.  Use this to stop syncing a task without losing it.  Re-link it
-later with `org-apple-reminders-push-heading'."
-  (interactive)
-  (let ((loc (org-apple-reminders--loc-at-point)))
-    (unless loc (user-error "No reminder at point"))
-    (let* ((lname (car loc))
-           (id    (cdr loc))
-           (title (save-excursion
-                    (org-back-to-heading t)
-                    (org-get-heading t t t t))))
-      (unless (yes-or-no-p
-               (format "Remove \"%s\" from Apple Reminders (keep org heading)? "
-                       title))
-        (user-error "Aborted"))
-      (org-apple-reminders--delete-in-apple lname id)
-      (when-let (entry (cl-find lname org-apple-reminders--cache
-                                :key (lambda (e) (alist-get 'list e))
-                                :test #'string=))
-        (let ((cell (assq 'items entry)))
-          (when cell
-            (setcdr cell (cl-remove id (cdr cell)
-                                    :key (lambda (e) (alist-get 'id e))
-                                    :test #'string=)))))
-      (let ((org-apple-reminders--syncing t))
-        (save-excursion
-          (org-back-to-heading t)
-          (dolist (prop '("REMINDER_ID" "REMINDER_LIST"
-                          "REMINDER_APPLE_MOD" "REMINDER_ORG_MOD"))
-            (org-entry-delete nil prop))
-          (org-set-property "REMINDER_NOSYNC" "t"))
-        (when (buffer-file-name) (save-buffer)))
-      (message "Removed from Apple, kept in org: %s" title))))
+REMINDER_NOSYNC property is set so it is never pushed back to Apple.  Use
+this to stop syncing a task without losing it.  Re-link it later with
+`org-apple-reminders-push-heading'."
+  (interactive
+   (list (and (use-region-p) (region-beginning))
+         (and (use-region-p) (region-end))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not in an org-mode buffer"))
+  (if (and beg end)
+      ;; --- Region: unlink every selected reminder ---
+      (let ((markers (org-apple-reminders--region-reminder-markers beg end)))
+        (unless markers
+          (user-error "No reminders in the selected region"))
+        (unless (yes-or-no-p
+                 (format
+                  "Remove %d reminder%s from Apple Reminders (keep org headings)? "
+                  (length markers)
+                  (if (= (length markers) 1) "" "s")))
+          (user-error "Aborted"))
+        (let ((org-apple-reminders--syncing t) (n 0))
+          (dolist (m markers)
+            (when (marker-buffer m)
+              (save-excursion
+                (goto-char m)
+                (when (org-apple-reminders--unlink-apple-at-point)
+                  (org-apple-reminders--strip-link-properties)
+                  (setq n (1+ n)))))
+            (set-marker m nil))
+          (when (and (buffer-file-name) (buffer-modified-p)) (save-buffer))
+          (message "Removed %d reminder%s from Apple, kept in org"
+                   n (if (= n 1) "" "s"))))
+    ;; --- Single heading ---
+    (let ((loc (org-apple-reminders--loc-at-point)))
+      (unless loc (user-error "No reminder at point"))
+      (let ((title (save-excursion (org-back-to-heading t)
+                                   (org-get-heading t t t t))))
+        (unless (yes-or-no-p
+                 (format "Remove \"%s\" from Apple Reminders (keep org heading)? "
+                         title))
+          (user-error "Aborted"))
+        (org-apple-reminders--unlink-apple-at-point)
+        (let ((org-apple-reminders--syncing t))
+          (org-apple-reminders--strip-link-properties)
+          (when (buffer-file-name) (save-buffer)))
+        (message "Removed from Apple, kept in org: %s" title)))))
 
 ;;; Live hooks: TODO state, priority, deadline, tags
 
@@ -906,8 +965,26 @@ later with `org-apple-reminders-push-heading'."
       (org-end-of-subtree t t)
     (goto-char (point-max))
     (unless (bolp) (insert "\n"))
+    ;; Keep one blank line between the previous section and the new heading.
+    (unless (or (bobp)
+                (save-excursion (forward-line -1) (looking-at-p "[ \t]*$")))
+      (insert "\n"))
     (insert (format "* %s [/]\n" list-name)))
   (unless (bolp) (insert "\n")))
+
+(defun org-apple-reminders--normalize-list-spacing ()
+  "Ensure a blank line precedes every `* ' list heading except the first one.
+Tidies sections that earlier versions inserted flush against each other."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((first t))
+      (while (re-search-forward "^\\* " nil t)
+        (forward-line 0)
+        (if first
+            (setq first nil)
+          (unless (save-excursion (forward-line -1) (looking-at-p "[ \t]*$"))
+            (insert "\n")))
+        (forward-line 1)))))
 
 (defun org-apple-reminders--insert-org-heading (item list-name)
   "Insert ** TODO org heading for Apple ITEM under LIST-NAME's section."
@@ -929,6 +1006,51 @@ later with `org-apple-reminders-push-heading'."
     (when (and (stringp notes) (not (string-empty-p notes)))
       (dolist (line (split-string notes "\n"))
         (insert (format "   %s\n" line))))))
+
+(defun org-apple-reminders--list-section-p ()
+  "Return non-nil if the level-1 heading at point is a pure reminders list.
+True when the section is empty or every heading beneath it carries a
+REMINDER_ID — hand-written content under a level-1 heading makes it false."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((end  (save-excursion (org-end-of-subtree t t) (point)))
+          (pure t))
+      (while (and pure (outline-next-heading) (< (point) end))
+        (unless (org-entry-get nil "REMINDER_ID")
+          (setq pure nil)))
+      pure)))
+
+(defun org-apple-reminders--prune-excluded-lists ()
+  "Delete `* List' sections in the current buffer whose list is excluded.
+A section is removed when its name is not in the effective included-lists
+set AND it is a pure reminders list (see `org-apple-reminders--list-section-p',
+so hand-written content is never touched).  No-op when all lists are
+included.  Return the number of sections removed."
+  (let ((included (org-apple-reminders--effective-included-lists))
+        (removed 0))
+    (when included
+      (let ((org-apple-reminders--syncing t)
+            (markers nil))
+        (save-excursion
+          (org-map-entries
+           (lambda ()
+             (let ((name (string-trim
+                          (replace-regexp-in-string
+                           "\\[[0-9]*/[0-9]*\\][ \t]*$" ""
+                           (org-get-heading t t t t)))))
+               (when (and (not (member name included))
+                          (org-apple-reminders--list-section-p))
+                 (push (point-marker) markers))))
+           "LEVEL=1"))
+        (dolist (m markers)
+          (when (marker-buffer m)
+            (goto-char m)
+            (org-back-to-heading t)
+            (delete-region (point)
+                           (save-excursion (org-end-of-subtree t t) (point)))
+            (setq removed (1+ removed)))
+          (set-marker m nil))))
+    removed))
 
 (defun org-apple-reminders--in-sync-file-p ()
   "Return non-nil if the current buffer visits `org-apple-reminders-sync-file'."
@@ -1047,7 +1169,8 @@ New Apple items not linked in any known file → pulled into sync-file only."
                              (puthash (alist-get 'id item) item ht)))
                          ht))
          (id-index     (org-apple-reminders--build-id-index))
-         (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0))
+         (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
+         (n-pruned 0))
     (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
@@ -1204,10 +1327,20 @@ New Apple items not linked in any known file → pulled into sync-file only."
                   (dolist (m (nreverse changed-positions))
                     (when (marker-position m)
                       (goto-char m) (org-reveal) (set-marker m nil)))))))))
-      ;; Phase 2: pull new Apple items into sync-file only
+      ;; Phase 2: prune excluded lists, then pull new Apple items
       (with-current-buffer (find-file-noselect sync-file)
         (org-save-outline-visibility t
           (let (changed-positions)
+            ;; Drop sections for lists removed from the included-lists set
+            ;; so reminders.org keeps mirroring the current selection.
+            (setq n-pruned (org-apple-reminders--prune-excluded-lists))
+            ;; Ensure every explicitly-included list has a `* List' section,
+            ;; even when it is empty, so the selection is mirrored exactly.
+            (let ((included (org-apple-reminders--effective-included-lists)))
+              (when included
+                (dolist (lname included)
+                  (save-excursion
+                    (org-apple-reminders--goto-list-heading lname)))))
             (dolist (entry data)
               (let ((lname (alist-get 'list  entry))
                     (items (alist-get 'items entry)))
@@ -1226,13 +1359,18 @@ New Apple items not linked in any known file → pulled into sync-file only."
                               (org-set-property "REMINDER_APPLE_MOD" md))))
                         (puthash id sync-file id-index)
                         (setq n-pulled (1+ n-pulled))))))))
-            (when changed-positions
+            ;; Keep a blank line before every list heading, then recalculate
+            ;; the [N/M] progress cookies — freshly pulled items (and new
+            ;; list headings) leave them stale until now.
+            (org-apple-reminders--normalize-list-spacing)
+            (ignore-errors (org-update-statistics-cookies t))
+            (when (buffer-modified-p)
               (save-buffer)
               (dolist (m (nreverse changed-positions))
                 (when (marker-position m)
                   (goto-char m) (org-reveal) (set-marker m nil)))))))
-    (message "Reminders: %d←DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated"
-             n-done n-reopened n-pushed n-pulled n-updated))))
+    (message "Reminders: %d←DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated  %d pruned"
+             n-done n-reopened n-pushed n-pulled n-updated n-pruned))))
 
 ;;; Background pull (Apple → org, async)
 
@@ -1556,7 +1694,6 @@ Run once after upgrading from a version that stored items at level 1."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "R") #'org-apple-reminders-sync)
     (define-key map (kbd "f") #'org-apple-reminders-open-file)
-    (define-key map (kbd "a") #'org-apple-reminders-add)
     (define-key map (kbd "l") #'org-apple-reminders-show-lists)
     (define-key map (kbd "L") #'org-apple-reminders-create-list)
     (define-key map (kbd "X") #'org-apple-reminders-delete-list)

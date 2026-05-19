@@ -100,7 +100,6 @@ the `C-c r` prefix — no manual `define-key` calls required.
 |---|---|
 | `C-c r R` | `org-apple-reminders-sync` |
 | `C-c r f` | `org-apple-reminders-open-file` |
-| `C-c r a` | `org-apple-reminders-add` |
 | `C-c r l` | `org-apple-reminders-show-lists` |
 | `C-c r L` | `org-apple-reminders-create-list` |
 | `C-c r X` | `org-apple-reminders-delete-list` |
@@ -150,10 +149,9 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 |---|---|
 | `org-apple-reminders-sync` | Full bidirectional sync (`C-c r R`) |
 | `org-apple-reminders-open-file` | Open `reminders.org` directly (`C-c r f`) |
-| `org-apple-reminders-add` | Add a new reminder interactively (`C-c r a`) |
 | `org-apple-reminders-push-heading` | Push the heading at point — or every heading in the active region — to Apple, from any org file (`C-c r p`, also `C-c r m`) |
-| `org-apple-reminders-remove-from-apple` | Delete the Apple reminder but keep the org heading (`C-c r d`) |
-| `org-apple-reminders-delete-reminder` | Delete reminder from Apple **and** org (`C-c r D`) |
+| `org-apple-reminders-remove-from-apple` | Delete the Apple reminder but keep the org heading — point, or every reminder in the region (`C-c r d`) |
+| `org-apple-reminders-delete-reminder` | Delete reminder from Apple **and** org — point, or every reminder in the region (`C-c r D`) |
 | `org-apple-reminders-show-lists` | List all Apple Reminders lists (`C-c r l`) |
 | `org-apple-reminders-create-list` | Create a new Apple Reminders list (`C-c r L`) |
 | `org-apple-reminders-delete-list` | Delete a whole Apple list **and** its `* ListName` section (`C-c r X`) |
@@ -199,6 +197,20 @@ properties, and sets `REMINDER_NOSYNC: t` on the heading so it stays in the
 org file as a plain TODO and is never pushed back. Re-link it later with
 `C-c r p`.
 
+### Deleting reminders
+
+Two commands remove reminders, both with a confirmation prompt:
+
+- **`org-apple-reminders-delete-reminder`** (`C-c r D`) — deletes the
+  reminder from Apple Reminders **and** removes the org heading.
+- **`org-apple-reminders-remove-from-apple`** (`C-c r d`) — deletes only the
+  Apple reminder; the org heading stays as a plain TODO (see above).
+
+Both act on the reminder at point, or — with an **active region** — on
+*every* reminder in the selection at once. Mark a block of headings, press
+`C-c r D` (or `C-c r d`), confirm the count, and they are all removed in one
+step. Headings in the region without a `REMINDER_ID` are ignored.
+
 ### Selective list sync
 
 By default every Apple Reminders list is mirrored into org. If you have
@@ -206,8 +218,9 @@ shopping lists, cleaning schedules, or OmniFocus mirrors that you never want
 in org-agenda, restrict the sync to specific lists.
 
 **Interactively (recommended)** — press `C-c r i` and multi-select the lists
-to sync. The choice is saved to `custom-file` and survives restarts. See
-[Choosing synced lists interactively](#choosing-synced-lists-interactively).
+to sync. The picker queries Apple live, so lists created since the last sync
+are offered too. The choice is saved to `custom-file` and survives restarts.
+See [Choosing synced lists interactively](#choosing-synced-lists-interactively).
 
 **In your config** — set the variable directly:
 
@@ -215,10 +228,18 @@ to sync. The choice is saved to `custom-file` and survives restarts. See
 (setq org-apple-reminders-included-lists '("Work" "Personal"))
 ```
 
-Only new Apple items from the listed lists will be pulled into org. Items
-already present in the org file (with a `REMINDER_ID`) continue to sync
-bidirectionally regardless of this setting — dropping a list from the set
-does not delete its existing org headings.
+`reminders.org` mirrors exactly the included lists. On the next full sync
+(`C-c r R`):
+
+- items from included lists are pulled in;
+- a list **removed** from the set has its whole `* List` section deleted
+  from `reminders.org` (only if every heading under it is a linked
+  reminder — hand-written content is never touched). The Apple list itself
+  is untouched; re-include the list to pull it back.
+
+Reminders linked from **other** org files keep syncing bidirectionally
+regardless of this setting — selective sync only governs the `reminders.org`
+mirror.
 
 Set to `nil` (the default) to sync all lists.
 
