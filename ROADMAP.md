@@ -9,6 +9,15 @@ _(nothing in active development)_
 
 ## Done
 
+- **Push a selection of headings** — `org-apple-reminders-push-heading`
+  (`C-c r p`, also `C-c r m`) now works on an active region: every heading in
+  the selection is processed in one step — unlinked TODOs are created, linked
+  ones already in the list are updated, and linked ones in another list are
+  moved. Non-task headings in the region are skipped. The target list is
+  created in Apple Reminders if it does not exist. A separate "move" command
+  proved redundant — push is a superset — so `m` is an alias for `p`.
+  ✓ Merged to `main` (v1.8).
+
 - **Move on push** — `org-apple-reminders-push-heading` (`C-c r p`) no longer
   duplicates an already-linked task. Pushing it to its current list updates
   it in place; pushing it to a different list MOVES it — the old Apple

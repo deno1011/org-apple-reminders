@@ -8,6 +8,7 @@ Bidirectional sync between Emacs [org-mode](https://orgmode.org) and macOS Apple
 - Conflict resolution via dual timestamps (`REMINDER_APPLE_MOD` / `REMINDER_ORG_MOD`)
 - Fields synced: title, due date + time, priority (A/B/C ↔ 1/5/9), flagged/starred, notes
 - Selective list sync — choose which Apple lists appear in org
+- Push any org heading — or a whole region of headings — to Apple; move reminders between lists
 - Progress cookies `[N/M]` on list headings
 - Org-agenda and org-capture integration
 - Automatic background pull (configurable interval)
@@ -105,6 +106,7 @@ the `C-c r` prefix — no manual `define-key` calls required.
 | `C-c r X` | `org-apple-reminders-delete-list` |
 | `C-c r i` | `org-apple-reminders-set-included-lists` |
 | `C-c r p` | `org-apple-reminders-push-heading` |
+| `C-c r m` | `org-apple-reminders-push-heading` (alias of `C-c r p`) |
 | `C-c r d` | `org-apple-reminders-remove-from-apple` |
 | `C-c r D` | `org-apple-reminders-delete-reminder` |
 
@@ -149,7 +151,7 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 | `org-apple-reminders-sync` | Full bidirectional sync (`C-c r R`) |
 | `org-apple-reminders-open-file` | Open `reminders.org` directly (`C-c r f`) |
 | `org-apple-reminders-add` | Add a new reminder interactively (`C-c r a`) |
-| `org-apple-reminders-push-heading` | Push org heading at point to Apple — works from any org file (`C-c r p`) |
+| `org-apple-reminders-push-heading` | Push the heading at point — or every heading in the active region — to Apple, from any org file (`C-c r p`, also `C-c r m`) |
 | `org-apple-reminders-remove-from-apple` | Delete the Apple reminder but keep the org heading (`C-c r d`) |
 | `org-apple-reminders-delete-reminder` | Delete reminder from Apple **and** org (`C-c r D`) |
 | `org-apple-reminders-show-lists` | List all Apple Reminders lists (`C-c r l`) |
@@ -158,15 +160,44 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 | `org-apple-reminders-set-included-lists` | Multi-select which lists sync; saved permanently (`C-c r i`) |
 | `org-apple-reminders-migrate-flat-headings` | One-time migration from flat layout |
 
-`org-apple-reminders-push-heading` works in **any** org buffer, not just
-`reminders.org` — point at a `TODO` heading and press `C-c r p` to create
-the Apple reminder and link the heading. The file is registered so future
-syncs keep it up to date.
+### Pushing headings to Apple
 
-`org-apple-reminders-remove-from-apple` is the inverse of a push: it deletes
-the Apple-side reminder, removes the `REMINDER_*` link properties, and sets
-`REMINDER_NOSYNC: t` on the heading so it stays in the org file as a plain
-TODO and is never pushed back. Re-link it later with `C-c r p`.
+`org-apple-reminders-push-heading` (`C-c r p`, also bound to `C-c r m`)
+links org headings to Apple Reminders. It works in **any** org buffer — not
+only `reminders.org`.
+
+- **One heading** — point at a heading, press `C-c r p`, choose a list.
+- **Several at once** — mark a region covering multiple headings and press
+  `C-c r p`; every heading in the selection is processed in one step.
+
+What happens to each heading depends on its current state:
+
+| Heading | Result |
+|---|---|
+| Unlinked `TODO` / `NEXT` / `WAITING` | A new Apple reminder is created in the chosen list |
+| Already linked to that list | The Apple reminder is updated |
+| Linked to a **different** list | **Moved** — the old Apple reminder is deleted and recreated in the chosen list (never duplicated) |
+| Not a task (e.g. a `* List` heading) | Skipped — region mode only |
+
+The chosen list is **created in Apple** automatically if it does not exist.
+
+Where the org heading ends up after a push:
+
+- **In `reminders.org`** — a created or moved heading's subtree is placed
+  under the target `* List` heading, so the file keeps mirroring Apple.
+- **In any other org file** — the heading stays exactly where it is; only
+  its `REMINDER_*` properties change. A heading living in a project or notes
+  file is never torn out of its document.
+
+When you push from a file other than `reminders.org`, that file is
+registered in `org-apple-reminders-extra-files` so future syncs keep it up
+to date. `C-c r m` is a convenience alias for `C-c r p`.
+
+`org-apple-reminders-remove-from-apple` (`C-c r d`) is the inverse of a
+push: it deletes the Apple-side reminder, removes the `REMINDER_*` link
+properties, and sets `REMINDER_NOSYNC: t` on the heading so it stays in the
+org file as a plain TODO and is never pushed back. Re-link it later with
+`C-c r p`.
 
 ### Selective list sync
 

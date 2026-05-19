@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Denis Butic
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
-;; Version: 1.7
+;; Version: 1.8
 ;; Package-Requires: ((emacs "27.1") (org "9.3") (cl-lib "0.5"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -22,6 +22,8 @@
 ;;   - Fields synced: title, due date + time, priority (A/B/C <-> 1/5/9),
 ;;     flagged/starred, notes
 ;;   - Selective list sync via `org-apple-reminders-included-lists'
+;;   - Push any org heading, or a whole region of headings, to Apple;
+;;     move reminders between lists without duplicating them
 ;;   - Progress cookies [N/M] on list headings
 ;;   - Org-agenda integration
 ;;   - Org-capture template
@@ -519,6 +521,18 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
           (json-parse-string (org-apple-reminders--jxa-run script))
         (error nil)))))
 
+(defun org-apple-reminders--ensure-list (list-name)
+  "Ensure an Apple Reminders list named LIST-NAME exists, creating it if absent.
+Return non-nil on success."
+  (let ((script
+         (format "var app=Application('Reminders');
+if(app.lists.name().indexOf(%s)<0){app.lists.push(app.List({name:%s}));}
+JSON.stringify(true);"
+                 (json-encode list-name) (json-encode list-name))))
+    (condition-case nil
+        (eq t (json-parse-string (org-apple-reminders--jxa-run script)))
+      (error nil))))
+
 ;;; Conflict resolution helpers
 
 (defun org-apple-reminders--find-in-cache (id)
@@ -562,75 +576,205 @@ DUE-DATE is an ISO date string like \"2025-12-31\"."
 
 ;;; Org heading → Apple push
 
-(defun org-apple-reminders-push-heading (&optional list-name)
-  "Push the org heading at point to Apple Reminders in the chosen list.
+(defun org-apple-reminders--register-current-file ()
+  "Register the current buffer's file in `org-apple-reminders-extra-files'.
+Return the file name when it was newly registered, nil otherwise (including
+when the buffer visits no file or the file is already known)."
+  (when (buffer-file-name)
+    (let ((this-file (expand-file-name (buffer-file-name))))
+      (unless (member this-file (org-apple-reminders--known-files))
+        (customize-save-variable
+         'org-apple-reminders-extra-files
+         (cons (buffer-file-name) org-apple-reminders-extra-files))
+        (buffer-file-name)))))
 
-An unlinked heading (no REMINDER_ID) gets a new reminder created and is
-never relocated.  An already-linked heading is never duplicated: choosing
-its current list updates the reminder in place, and choosing a different
-list MOVES it — the old Apple reminder is deleted and recreated in the new
-list.  When the heading lives in `org-apple-reminders-sync-file' its subtree
-is relocated under the new list's heading as well; in any other org file the
-heading keeps its place and only its properties change, so the surrounding
-document structure is left intact."
-  (interactive
-   (let ((lists (or (org-apple-reminders--cached-list-names)
-                    (org-apple-reminders-lists))))
-     (list (completing-read "List: " lists nil t))))
-  (unless (derived-mode-p 'org-mode)
-    (user-error "Not in an org-mode buffer"))
-  (let* ((target   (or list-name (org-apple-reminders--default-list)))
-         (old-id   (org-entry-get nil "REMINDER_ID"))
+(defun org-apple-reminders--push-heading-1 (target)
+  "Push the heading at point to Apple list TARGET, without relocating it.
+
+Do the Apple-side work and stamp the org properties only.  Return a cons
+\(STATUS . RELOCATE): STATUS is `created', `updated', `moved' or `failed';
+RELOCATE is non-nil when the heading's subtree should be placed under
+TARGET's section — i.e. it was newly created or it changed list.  Call with
+point inside the heading's entry and `org-apple-reminders--syncing' bound
+non-nil."
+  (let* ((old-id   (org-entry-get nil "REMINDER_ID"))
          (old-list (org-entry-get nil "REMINDER_LIST"))
-         (vals     (org-apple-reminders--org-item-values))
-         (title    (alist-get 'title vals)))
+         (vals     (org-apple-reminders--org-item-values)))
     (cond
-     ;; Linked, same list — update in place, nothing moves.
+     ;; Linked, same list — update in place.
      ((and old-id old-list (string= old-list target))
       (org-apple-reminders--update-in-apple old-list old-id vals)
-      (message "Updated in Apple Reminders [%s]: %s" target title))
-     ;; Linked, different list — MOVE; never duplicate.
+      (cons 'updated nil))
+     ;; Linked, different list — move (delete old, recreate in TARGET).
      ((and old-id old-list)
       (let ((new-id (org-apple-reminders--create-in-apple target vals)))
-        (unless new-id
-          (user-error "Could not create reminder in \"%s\"; nothing moved" target))
-        (org-apple-reminders--delete-in-apple old-list old-id)
-        (when (member (org-get-todo-state) '("DONE" "CANCELLED"))
-          (org-apple-reminders--complete-in-apple target new-id))
-        (let ((org-apple-reminders--syncing t)
-              (in-sync (org-apple-reminders--in-sync-file-p)))
+        (if (not new-id)
+            (cons 'failed nil)
+          (org-apple-reminders--delete-in-apple old-list old-id)
+          (when (member (org-get-todo-state) '("DONE" "CANCELLED"))
+            (org-apple-reminders--complete-in-apple target new-id))
           (org-set-property "REMINDER_ID"   new-id)
           (org-set-property "REMINDER_LIST" target)
           ;; The recreated reminder has fresh timestamps; drop the stale ones.
           (org-entry-delete nil "REMINDER_APPLE_MOD")
           (org-entry-delete nil "REMINDER_ORG_MOD")
-          (if in-sync
-              (org-apple-reminders--relocate-subtree-to-list target)
-            (when (buffer-file-name) (save-buffer)))
-          (message "Moved [%s -> %s] in Apple%s: %s"
-                   old-list target
-                   (if in-sync " and reminders.org"
-                     " (org heading kept in place)")
-                   title))))
-     ;; Unlinked — fresh push; never relocated.
+          (cons 'moved t))))
+     ;; Unlinked — fresh push.
      (t
       (let ((new-id (org-apple-reminders--create-in-apple target vals)))
-        (when new-id
+        (if (not new-id)
+            (cons 'failed nil)
           (org-set-property "REMINDER_ID"   new-id)
           (org-set-property "REMINDER_LIST" target)
           (org-entry-delete nil "REMINDER_NOSYNC")
-          ;; Register this file so future syncs find it and don't re-insert
-          ;; the entry into reminders.org.
-          (let ((registered ""))
-            (when (buffer-file-name)
-              (let ((this-file (expand-file-name (buffer-file-name))))
-                (unless (member this-file (org-apple-reminders--known-files))
-                  (customize-save-variable
-                   'org-apple-reminders-extra-files
-                   (cons (buffer-file-name) org-apple-reminders-extra-files))
-                  (setq registered (format "  [registered %s]" (buffer-file-name))))))
-            (message "Pushed to Apple Reminders [%s]: %s%s"
-                     target title registered))))))))
+          ;; A new reminder belongs under its list section too (sync file).
+          (cons 'created t)))))))
+
+(defun org-apple-reminders--push-region (beg end target)
+  "Push every reminder heading between BEG and END to Apple list TARGET.
+
+Unlinked TODO/NEXT/WAITING headings are created in TARGET; linked headings
+already in TARGET are updated; linked headings in another list are moved.
+Headings that are neither linked reminders nor open tasks are skipped.
+TARGET must already exist in Apple.  Moved subtrees are relocated under
+TARGET's `* ' heading when the buffer visits `org-apple-reminders-sync-file'.
+
+Return a plist with counts :created :updated :moved :skipped :failed and
+:registered (a newly registered file path, or nil)."
+  (let ((in-sync (org-apple-reminders--in-sync-file-p))
+        (markers nil) (relocate nil) (registered nil)
+        (created 0) (updated 0) (moved 0) (skipped 0) (failed 0))
+    ;; Pass 1 — collect linked reminders and open tasks inside the region.
+    (save-excursion
+      (goto-char beg)
+      (if (org-before-first-heading-p)
+          (outline-next-heading)
+        (org-back-to-heading t))
+      (while (and (not (eobp)) (<= (point) end))
+        (if (or (org-entry-get nil "REMINDER_ID")
+                (member (org-get-todo-state) '("TODO" "NEXT" "WAITING")))
+            (push (point-marker) markers)
+          (setq skipped (1+ skipped)))
+        (outline-next-heading)))
+    (setq markers (nreverse markers))
+    (let ((org-apple-reminders--syncing t))
+      ;; Pass 2 — Apple side + property stamping (no structural moves).
+      (dolist (m markers)
+        (let (relocate-this)
+          (save-excursion
+            (goto-char m)
+            (org-back-to-heading t)
+            (let* ((res    (org-apple-reminders--push-heading-1 target))
+                   (status (car res)))
+              (setq relocate-this (cdr res))
+              (pcase status
+                ('created (setq created (1+ created))
+                          (unless registered
+                            (setq registered
+                                  (org-apple-reminders--register-current-file))))
+                ('updated (setq updated (1+ updated)))
+                ('moved   (setq moved (1+ moved)))
+                ('failed  (setq failed (1+ failed))))))
+          (if relocate-this
+              (push m relocate)
+            (set-marker m nil))))
+      (setq relocate (nreverse relocate))
+      ;; Pass 3 — relocate created/moved subtrees in one batch (sync file
+      ;; only).  Cut every subtree first, then paste them under TARGET's
+      ;; heading, forced to level 2 so any heading level is normalised.
+      (when (and in-sync relocate)
+        (let ((trees nil))
+          (dolist (m relocate)
+            (when (marker-buffer m)
+              (save-excursion
+                (goto-char m)
+                (org-back-to-heading t)
+                (let ((s (point))
+                      (e (save-excursion (org-end-of-subtree t t) (point))))
+                  (push (buffer-substring s e) trees)
+                  (delete-region s e)))))
+          (save-excursion
+            (dolist (tree (nreverse trees))
+              (kill-new tree)
+              (org-apple-reminders--goto-list-heading target)
+              (org-paste-subtree 2)))
+          (ignore-errors (org-update-statistics-cookies t))))
+      (dolist (m relocate) (set-marker m nil))
+      (when (and (buffer-file-name) (buffer-modified-p)) (save-buffer)))
+    (list :created created :updated updated :moved moved
+          :skipped skipped :failed failed :registered registered)))
+
+(defun org-apple-reminders-push-heading (&optional list-name beg end)
+  "Push the org heading at point to Apple Reminders in the chosen list.
+
+With an active region, every heading in the region is pushed instead of
+just the one at point.
+
+For each heading: an unlinked heading gets a new reminder created; a heading
+already linked to the chosen list is updated in place; a heading linked to a
+different list is MOVED — the old Apple reminder is deleted and recreated in
+the new list, never duplicated.
+
+When a moved heading lives in `org-apple-reminders-sync-file' its subtree is
+relocated under the new `* List' heading; in any other org file the heading
+keeps its place and only its properties change, so the surrounding document
+structure is left intact.
+
+In a region, only linked reminders and open TODO/NEXT/WAITING tasks are
+processed; other headings are skipped.  The chosen list is created in Apple
+Reminders if it does not exist yet."
+  (interactive
+   (let ((lists (or (org-apple-reminders--cached-list-names)
+                    (org-apple-reminders-lists))))
+     ;; Capture the region bounds now — they must not depend on the mark
+     ;; still being active after the `completing-read' prompt.
+     (list (completing-read "List: " lists nil nil)
+           (and (use-region-p) (region-beginning))
+           (and (use-region-p) (region-end)))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not in an org-mode buffer"))
+  (let ((target (string-trim (or list-name
+                                 (org-apple-reminders--default-list)
+                                 ""))))
+    (when (string-empty-p target)
+      (user-error "List name cannot be empty"))
+    (unless (org-apple-reminders--ensure-list target)
+      (user-error "Could not create or find Apple list \"%s\"" target))
+    (if (and beg end)
+        ;; --- Multiple headings in the selected region ---
+        (let* ((r   (org-apple-reminders--push-region beg end target))
+               (reg (plist-get r :registered)))
+          (message "Pushed to [%s]: %d created, %d updated, %d moved%s%s%s"
+                   target
+                   (plist-get r :created) (plist-get r :updated)
+                   (plist-get r :moved)
+                   (let ((s (plist-get r :skipped)))
+                     (if (> s 0) (format "; %d skipped" s) ""))
+                   (let ((f (plist-get r :failed)))
+                     (if (> f 0) (format "; %d failed" f) ""))
+                   (if reg (format "  [registered %s]" reg) "")))
+      ;; --- Single heading at point ---
+      (let* ((org-apple-reminders--syncing t)
+             (in-sync (org-apple-reminders--in-sync-file-p))
+             (title   (org-get-heading t t t t))
+             (res     (org-apple-reminders--push-heading-1 target))
+             (status  (car res))
+             (reloc   (cdr res))
+             (reg     (and (eq status 'created)
+                           (org-apple-reminders--register-current-file))))
+        (when (eq status 'failed)
+          (user-error "Could not push \"%s\" to list \"%s\"" title target))
+        (if (and reloc in-sync)
+            (org-apple-reminders--relocate-subtree-to-list target)
+          (when (and (buffer-file-name) (buffer-modified-p)) (save-buffer)))
+        (message "%s [%s]: %s%s"
+                 (pcase status
+                   ('created "Pushed to Apple Reminders")
+                   ('updated "Updated in Apple Reminders")
+                   ('moved   (if in-sync "Moved in Apple + reminders.org"
+                               "Moved in Apple (heading kept in place)")))
+                 target title
+                 (if reg (format "  [registered %s]" reg) ""))))))
 
 ;;;###autoload
 (defun org-apple-reminders-delete-reminder ()
@@ -1418,14 +1562,19 @@ Run once after upgrading from a version that stored items at level 1."
     (define-key map (kbd "X") #'org-apple-reminders-delete-list)
     (define-key map (kbd "i") #'org-apple-reminders-set-included-lists)
     (define-key map (kbd "p") #'org-apple-reminders-push-heading)
+    ;; `m' is kept as an alias for `p' — push handles single headings and
+    ;; regions, so a separate "move" command is no longer needed.
+    (define-key map (kbd "m") #'org-apple-reminders-push-heading)
     (define-key map (kbd "d") #'org-apple-reminders-remove-from-apple)
     (define-key map (kbd "D") #'org-apple-reminders-delete-reminder)
     map)
   "Keymap for `org-apple-reminders' commands.
 `org-apple-reminders-setup' binds this under
-`org-apple-reminders-keymap-prefix' (default \"C-c r\").  The
-heading commands (p/d/D) `user-error' when point is not on a
-reminder, so the whole map is safe to bind globally.")
+`org-apple-reminders-keymap-prefix' (default \"C-c r\").  Keys
+`p' and `m' both run `org-apple-reminders-push-heading' (single
+heading or active region).  The heading commands (p/m/d/D)
+`user-error' when there is nothing to act on, so the whole map is
+safe to bind globally.")
 ;; Allow the variable to be used directly as a prefix key.
 (fset 'org-apple-reminders-command-map org-apple-reminders-command-map)
 
