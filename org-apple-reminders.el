@@ -110,6 +110,16 @@ with new headings by this package."
   :type '(repeat file)
   :group 'org-apple-reminders)
 
+(defcustom org-apple-reminders-keymap-prefix "C-c r"
+  "Prefix key sequence for `org-apple-reminders-command-map'.
+`org-apple-reminders-setup' binds the command map under this prefix.
+Set to nil to bind no prefix and wire up the keymap yourself, e.g.:
+
+  (keymap-global-set \"C-c a\" org-apple-reminders-command-map)"
+  :type '(choice (key-sequence :tag "Prefix key")
+                 (const :tag "Do not bind" nil))
+  :group 'org-apple-reminders)
+
 ;;; List filter
 
 (defun org-apple-reminders--list-included-p (list-name)
@@ -465,6 +475,7 @@ DUE-DATE is an ISO date string like \"2025-12-31\"."
     (when new-id
       (org-set-property "REMINDER_ID"   new-id)
       (org-set-property "REMINDER_LIST" list)
+      (org-entry-delete nil "REMINDER_NOSYNC")
       ;; Register this file so future syncs find it and don't re-insert
       ;; the entry into reminders.org.
       (let ((registered ""))
@@ -513,6 +524,45 @@ Works in reminders.org directly or from any org buffer with REMINDER_ID."
                   (delete-region beg end))
                 (save-buffer))))))
       (message "Deleted: %s" title))))
+
+;;;###autoload
+(defun org-apple-reminders-remove-from-apple ()
+  "Delete the reminder at point from Apple Reminders but keep the org heading.
+The heading stays in the org file as an ordinary TODO; its REMINDER_ID,
+REMINDER_LIST and modification-timestamp properties are removed and a
+REMINDER_NOSYNC property is set so the heading is never pushed back to
+Apple.  Use this to stop syncing a task without losing it.  Re-link it
+later with `org-apple-reminders-push-heading'."
+  (interactive)
+  (let ((loc (org-apple-reminders--loc-at-point)))
+    (unless loc (user-error "No reminder at point"))
+    (let* ((lname (car loc))
+           (id    (cdr loc))
+           (title (save-excursion
+                    (org-back-to-heading t)
+                    (org-get-heading t t t t))))
+      (unless (yes-or-no-p
+               (format "Remove \"%s\" from Apple Reminders (keep org heading)? "
+                       title))
+        (user-error "Aborted"))
+      (org-apple-reminders--delete-in-apple lname id)
+      (when-let (entry (cl-find lname org-apple-reminders--cache
+                                :key (lambda (e) (alist-get 'list e))
+                                :test #'string=))
+        (let ((cell (assq 'items entry)))
+          (when cell
+            (setcdr cell (cl-remove id (cdr cell)
+                                    :key (lambda (e) (alist-get 'id e))
+                                    :test #'string=)))))
+      (let ((org-apple-reminders--syncing t))
+        (save-excursion
+          (org-back-to-heading t)
+          (dolist (prop '("REMINDER_ID" "REMINDER_LIST"
+                          "REMINDER_APPLE_MOD" "REMINDER_ORG_MOD"))
+            (org-entry-delete nil prop))
+          (org-set-property "REMINDER_NOSYNC" "t"))
+        (when (buffer-file-name) (save-buffer)))
+      (message "Removed from Apple, kept in org: %s" title))))
 
 ;;; Live hooks: TODO state, priority, deadline, tags
 
@@ -612,7 +662,8 @@ other linked files only push updates to already-stamped headings."
               (state  (org-get-todo-state))
               (cached (and id (org-apple-reminders--find-in-cache id))))
          (cond
-          ((and (null id) is-sync-file (member state '("TODO" "NEXT" "WAITING")))
+          ((and (null id) is-sync-file (member state '("TODO" "NEXT" "WAITING"))
+                (not (org-entry-get nil "REMINDER_NOSYNC")))
            (push (point-marker) new-pts))
           ((and id rlist (member state '("DONE" "CANCELLED")))
            (when (and cached (not (eq (alist-get 'completed cached) t)))
@@ -709,7 +760,8 @@ New Apple items not linked in any known file → pulled into sync-file only."
                             (rlist (or (org-entry-get nil "REMINDER_LIST") default-list))
                             (state (org-get-todo-state)))
                        (cond
-                        ((and (null id) is-sync-file (member state '("TODO" "NEXT" "WAITING")))
+                        ((and (null id) is-sync-file (member state '("TODO" "NEXT" "WAITING"))
+                              (not (org-entry-get nil "REMINDER_NOSYNC")))
                          (push (point-marker) new-pts))
                         (id
                          (let ((apple (gethash id apple-by-id)))
@@ -876,7 +928,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
     (message "Reminders: %d←DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated"
              n-done n-reopened n-pushed n-pulled n-updated))))
 
-
 ;;; Background pull (Apple → org, async)
 
 (defun org-apple-reminders--background-pull ()
@@ -1035,7 +1086,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                      (ignore-errors (org-agenda-redo)))))))))))))))
          (error nil))))))
 
-
 ;;; Timer
 
 (defun org-apple-reminders--start-sync-timer ()
@@ -1086,7 +1136,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
                 (insert (format "  :PROPERTIES:\n  :REMINDER_LIST: %s\n  :REMINDER_ID: %s\n  :END:\n"
                                 lname id)))))))
       (add-to-list 'org-agenda-files file))))
-
 
 ;;; Save hook
 
@@ -1195,27 +1244,48 @@ Run once after upgrading from a version that stored items at level 1."
       (save-buffer))
     (message "Migrated %d entries under list headings." (length moves))))
 
+;;; Keymap
+
+(defvar org-apple-reminders-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "R") #'org-apple-reminders-sync)
+    (define-key map (kbd "f") #'org-apple-reminders-open-file)
+    (define-key map (kbd "a") #'org-apple-reminders-add)
+    (define-key map (kbd "l") #'org-apple-reminders-show-lists)
+    (define-key map (kbd "L") #'org-apple-reminders-create-list)
+    (define-key map (kbd "p") #'org-apple-reminders-push-heading)
+    (define-key map (kbd "d") #'org-apple-reminders-remove-from-apple)
+    (define-key map (kbd "D") #'org-apple-reminders-delete-reminder)
+    map)
+  "Keymap for `org-apple-reminders' commands.
+`org-apple-reminders-setup' binds this under
+`org-apple-reminders-keymap-prefix' (default \"C-c r\").  The
+heading commands (p/d/D) `user-error' when point is not on a
+reminder, so the whole map is safe to bind globally.")
+;; Allow the variable to be used directly as a prefix key.
+(fset 'org-apple-reminders-command-map org-apple-reminders-command-map)
+
 ;;; Setup entry point
 
 ;;;###autoload
 (defun org-apple-reminders-setup ()
-  "Activate org-apple-reminders: start background timer, set up capture and agenda.
+  "Activate org-apple-reminders: key map, background timer, capture, agenda.
 
 Call this once from your init file after setting
 `org-apple-reminders-sync-file' (and optionally
 `org-apple-reminders-auto-sync-interval').
 
-Suggested key bindings (add to your init file):
+Binds `org-apple-reminders-command-map' under
+`org-apple-reminders-keymap-prefix' (default \"C-c r\"):
 
-  (global-set-key (kbd \"C-c r R\") #\\='org-apple-reminders-sync)
-  (global-set-key (kbd \"C-c r f\") #\\='org-apple-reminders-open-file)
-  (global-set-key (kbd \"C-c r a\") #\\='org-apple-reminders-add)
-  (global-set-key (kbd \"C-c r l\") #\\='org-apple-reminders-show-lists)
-  (global-set-key (kbd \"C-c r L\") #\\='org-apple-reminders-create-list)
-  ;; In org-mode buffers:
-  (with-eval-after-load 'org
-    (define-key org-mode-map (kbd \"C-c r p\") #\\='org-apple-reminders-push-heading)
-    (define-key org-mode-map (kbd \"C-c r D\") #\\='org-apple-reminders-delete-reminder))"
+  C-c r R   sync                C-c r a   add reminder
+  C-c r f   open sync file      C-c r l   show lists
+  C-c r L   create list         C-c r p   push heading to Apple
+  C-c r d   remove from Apple (keep org heading)
+  C-c r D   delete reminder (Apple and org)"
+  (when org-apple-reminders-keymap-prefix
+    (global-set-key (kbd org-apple-reminders-keymap-prefix)
+                    org-apple-reminders-command-map))
   (org-apple-reminders--ensure-agenda-files)
   (with-eval-after-load 'org-agenda
     (org-apple-reminders--ensure-agenda-files))

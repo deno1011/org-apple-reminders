@@ -57,10 +57,11 @@ Clone this repository and add it to your load path:
 |---|---|---|
 | `org-apple-reminders-sync-file` | `"~/org/reminders.org"` | Org file mirrored with Apple Reminders |
 | `org-apple-reminders-sync-list` | `nil` (auto) | Default Apple list for new org items |
-| `org-apple-reminders-default-list` | `nil` (auto) | Fallback list for interactive commands |
 | `org-apple-reminders-auto-sync-interval` | `300` | Seconds between background pulls (0 = off) |
 | `org-apple-reminders-agenda-file` | `nil` | Optional separate read-only agenda file |
 | `org-apple-reminders-included-lists` | `nil` (all) | Lists to sync; nil means all lists |
+| `org-apple-reminders-extra-files` | `nil` | Extra org files scanned for linked reminder headings |
+| `org-apple-reminders-keymap-prefix` | `"C-c r"` | Prefix key for the command map; `nil` to not bind |
 
 Set `org-apple-reminders-included-lists` to restrict which Apple Reminders lists are pulled into org:
 
@@ -70,20 +71,34 @@ Set `org-apple-reminders-included-lists` to restrict which Apple Reminders lists
 
 Items already in the org file are always kept in sync; the filter only prevents new Apple items from being pulled into org.
 
-### Suggested key bindings
+### Key bindings
 
-Add to your init file after `(org-apple-reminders-setup)`:
+`org-apple-reminders-setup` installs a command keymap automatically under
+the `C-c r` prefix — no manual `define-key` calls required.
+
+| Key | Command |
+|---|---|
+| `C-c r R` | `org-apple-reminders-sync` |
+| `C-c r f` | `org-apple-reminders-open-file` |
+| `C-c r a` | `org-apple-reminders-add` |
+| `C-c r l` | `org-apple-reminders-show-lists` |
+| `C-c r L` | `org-apple-reminders-create-list` |
+| `C-c r p` | `org-apple-reminders-push-heading` |
+| `C-c r d` | `org-apple-reminders-remove-from-apple` |
+| `C-c r D` | `org-apple-reminders-delete-reminder` |
+
+To use a different prefix, set `org-apple-reminders-keymap-prefix` before
+calling `org-apple-reminders-setup`:
 
 ```emacs-lisp
-(global-set-key (kbd "C-c r R") #'org-apple-reminders-sync)
-(global-set-key (kbd "C-c r f") #'org-apple-reminders-open-file)
-(global-set-key (kbd "C-c r a") #'org-apple-reminders-add)
-(global-set-key (kbd "C-c r l") #'org-apple-reminders-show-lists)
-(global-set-key (kbd "C-c r L") #'org-apple-reminders-create-list)
+(setq org-apple-reminders-keymap-prefix "C-c a")
+```
 
-(with-eval-after-load 'org
-  (define-key org-mode-map (kbd "C-c r p") #'org-apple-reminders-push-heading)
-  (define-key org-mode-map (kbd "C-c r D") #'org-apple-reminders-delete-reminder))
+Set it to `nil` to bind no prefix and wire up the keymap yourself:
+
+```emacs-lisp
+(setq org-apple-reminders-keymap-prefix nil)
+(keymap-global-set "C-c a" org-apple-reminders-command-map)
 ```
 
 ## Usage
@@ -110,14 +125,25 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 
 | Command | Description |
 |---|---|
-| `org-apple-reminders-sync` | Full bidirectional sync |
+| `org-apple-reminders-sync` | Full bidirectional sync (`C-c r R`) |
 | `org-apple-reminders-open-file` | Open `reminders.org` directly (`C-c r f`) |
-| `org-apple-reminders-add` | Add a new reminder interactively |
-| `org-apple-reminders-push-heading` | Push org heading at point to Apple (`C-c r p` in org) |
-| `org-apple-reminders-delete-reminder` | Delete reminder from Apple and org (`C-c r D` in org) |
-| `org-apple-reminders-show-lists` | List all Apple Reminders lists |
-| `org-apple-reminders-create-list` | Create a new Apple Reminders list |
+| `org-apple-reminders-add` | Add a new reminder interactively (`C-c r a`) |
+| `org-apple-reminders-push-heading` | Push org heading at point to Apple — works from any org file (`C-c r p`) |
+| `org-apple-reminders-remove-from-apple` | Delete the Apple reminder but keep the org heading (`C-c r d`) |
+| `org-apple-reminders-delete-reminder` | Delete reminder from Apple **and** org (`C-c r D`) |
+| `org-apple-reminders-show-lists` | List all Apple Reminders lists (`C-c r l`) |
+| `org-apple-reminders-create-list` | Create a new Apple Reminders list (`C-c r L`) |
 | `org-apple-reminders-migrate-flat-headings` | One-time migration from flat layout |
+
+`org-apple-reminders-push-heading` works in **any** org buffer, not just
+`reminders.org` — point at a `TODO` heading and press `C-c r p` to create
+the Apple reminder and link the heading. The file is registered so future
+syncs keep it up to date.
+
+`org-apple-reminders-remove-from-apple` is the inverse of a push: it deletes
+the Apple-side reminder, removes the `REMINDER_*` link properties, and sets
+`REMINDER_NOSYNC: t` on the heading so it stays in the org file as a plain
+TODO and is never pushed back. Re-link it later with `C-c r p`.
 
 ### Selective list sync
 
@@ -188,6 +214,7 @@ Items are nested under `* ListName [N/M]` headings. The `[N/M]` cookie shows com
 | `REMINDER_LIST` | Package | Apple list name |
 | `REMINDER_APPLE_MOD` | Package | Apple's `modificationDate` when last pulled |
 | `REMINDER_ORG_MOD` | Package | Apple's `modificationDate` right after org pushed |
+| `REMINDER_NOSYNC` | `remove-from-apple` | When set, the heading is never pushed to Apple |
 
 ## Field mapping
 
