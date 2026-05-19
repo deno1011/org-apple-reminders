@@ -91,10 +91,35 @@ Set to a list of list-name strings to limit sync to those lists only:
 
   (setq org-apple-reminders-included-lists \\='(\"Work\" \"Personal\"))
 
+This is the *config-declared* value.  The interactive command
+`org-apple-reminders-set-included-lists' saves its choice separately in
+`org-apple-reminders-saved-included-lists' instead; which of the two is
+live is decided by `org-apple-reminders-included-lists-prefer-config'.
+
 Items already present in the org file are always kept in sync regardless
 of this setting; the filter only prevents NEW Apple items from being
 pulled into lists that are not included."
   :type '(choice (const  :tag "All lists" nil)
+                 (repeat :tag "Specific lists" string))
+  :group 'org-apple-reminders)
+
+(defcustom org-apple-reminders-included-lists-prefer-config nil
+  "Whether the config-declared included-lists value is authoritative.
+When non-nil, `org-apple-reminders-included-lists' always wins and the
+value saved by `org-apple-reminders-set-included-lists' is ignored.
+When nil (the default), the saved value wins once it exists, falling
+back to the config value otherwise.  The choice is explicit, so it does
+not depend on Emacs file-load order."
+  :type 'boolean
+  :group 'org-apple-reminders)
+
+(defcustom org-apple-reminders-saved-included-lists 'unset
+  "Included-lists value saved by `org-apple-reminders-set-included-lists'.
+Persisted to `custom-file'.  The sentinel `unset' means the command has
+never run; nil means \"all lists\"; a list of strings means those lists.
+Do not edit by hand — use `org-apple-reminders-set-included-lists'."
+  :type '(choice (const :tag "Never saved" unset)
+                 (const :tag "All lists" nil)
                  (repeat :tag "Specific lists" string))
   :group 'org-apple-reminders)
 
@@ -122,11 +147,21 @@ Set to nil to bind no prefix and wire up the keymap yourself, e.g.:
 
 ;;; List filter
 
+(defun org-apple-reminders--effective-included-lists ()
+  "Return the included-lists value currently in effect.
+Picks between the config value and the saved value according to
+`org-apple-reminders-included-lists-prefer-config'.  nil means all
+lists are included."
+  (if (or org-apple-reminders-included-lists-prefer-config
+          (eq org-apple-reminders-saved-included-lists 'unset))
+      org-apple-reminders-included-lists
+    org-apple-reminders-saved-included-lists))
+
 (defun org-apple-reminders--list-included-p (list-name)
   "Return non-nil if LIST-NAME should participate in sync.
-Always true when `org-apple-reminders-included-lists' is nil."
-  (or (null org-apple-reminders-included-lists)
-      (member list-name org-apple-reminders-included-lists)))
+Always true when the effective included-lists value is nil."
+  (let ((lists (org-apple-reminders--effective-included-lists)))
+    (or (null lists) (member list-name lists))))
 
 ;;; Multi-file helpers
 
@@ -244,6 +279,75 @@ CALLBACK receives the stdout string when the process exits."
            (json-encode name))
    (lambda (_)
      (message "Apple Reminders: created list \"%s\"." name))))
+
+;;;###autoload
+(defun org-apple-reminders-delete-list (name)
+  "Delete the Apple Reminders list NAME and its section from the sync file.
+All reminders in the list are removed from Apple, and the matching
+`* NAME' subtree (with every entry under it) is deleted from
+`org-apple-reminders-sync-file'."
+  (interactive
+   (list (completing-read "Delete which list: "
+                          (or (org-apple-reminders--cached-list-names)
+                              (org-apple-reminders-lists))
+                          nil t)))
+  (when (string-empty-p (string-trim name))
+    (user-error "List name cannot be empty"))
+  (unless (yes-or-no-p
+           (format "Delete list \"%s\" and ALL its reminders from Apple and org? "
+                   name))
+    (user-error "Aborted"))
+  (org-apple-reminders--jxa-run
+   (format "Application('Reminders').lists.byName(%s).delete();"
+           (json-encode name)))
+  (setq org-apple-reminders--cache
+        (cl-remove name org-apple-reminders--cache
+                   :key (lambda (e) (alist-get 'list e))
+                   :test #'string=))
+  (let ((file (expand-file-name org-apple-reminders-sync-file)))
+    (when (file-exists-p file)
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-apple-reminders--syncing t))
+          (save-excursion
+            (goto-char (point-min))
+            (when (re-search-forward
+                   (concat "^\\* " (regexp-quote name) "\\(?: \\|$\\)") nil t)
+              (org-back-to-heading t)
+              (delete-region (point)
+                             (save-excursion (org-end-of-subtree t t) (point)))
+              (save-buffer)))))))
+  (message "Deleted list: %s" name))
+
+(defun org-apple-reminders-set-included-lists ()
+  "Choose which Apple lists sync into org and save the choice permanently.
+Multi-select: every list you pick is included; the rest are excluded.
+Pick none to include all lists.  The choice is stored in `custom-file'
+via `org-apple-reminders-saved-included-lists', so it survives restarts.
+
+When `org-apple-reminders-included-lists-prefer-config' is non-nil the
+config value stays authoritative — the choice is still saved but does
+not take effect until that option is set back to nil."
+  (interactive)
+  (let* ((all     (or (org-apple-reminders--cached-list-names)
+                      (org-apple-reminders-lists)))
+         (current (let ((e (org-apple-reminders--effective-included-lists)))
+                    (and (listp e) e)))
+         (picked  (delete "" (completing-read-multiple
+                              "Sync these lists (empty = all): "
+                              all nil t
+                              (and current
+                                   (mapconcat #'identity current ",")))))
+         (value   (if (or (null picked)
+                          (null (cl-set-difference all picked :test #'string=)))
+                      nil
+                    picked)))
+    (customize-save-variable 'org-apple-reminders-saved-included-lists value)
+    (if org-apple-reminders-included-lists-prefer-config
+        (message
+         "Saved %s — but prefer-config is on, so the config list stays live."
+         (if value (string-join value ", ") "all lists"))
+      (message "Now syncing: %s"
+               (if value (string-join value ", ") "all lists")))))
 
 ;;;###autoload
 (defun org-apple-reminders-open-file ()
@@ -441,11 +545,10 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
   "Add a reminder TITLE to LIST-NAME with optional DUE-DATE and NOTES.
 DUE-DATE is an ISO date string like \"2025-12-31\"."
   (interactive
-   (let* ((lists   (or (org-apple-reminders--cached-list-names)
-                       (org-apple-reminders-lists)))
-          (default (car lists)))
+   (let ((lists (or (org-apple-reminders--cached-list-names)
+                    (org-apple-reminders-lists))))
      (list (read-string "Reminder: ")
-           (completing-read "List: " lists nil t default)
+           (completing-read "List: " lists nil t)
            (read-string "Due (optional, e.g. 2025-12-31): ")
            nil)))
   (let* ((list (or list-name (org-apple-reminders--default-list)))
@@ -462,11 +565,9 @@ DUE-DATE is an ISO date string like \"2025-12-31\"."
 (defun org-apple-reminders-push-heading (&optional list-name)
   "Push org heading at point to Apple Reminders, prompting for the target list."
   (interactive
-   (let* ((lists   (or (org-apple-reminders--cached-list-names)
-                       (org-apple-reminders-lists)))
-          (default (or (org-entry-get nil "REMINDER_LIST")
-                       (car lists))))
-     (list (completing-read "List: " lists nil t nil nil default))))
+   (let ((lists (or (org-apple-reminders--cached-list-names)
+                    (org-apple-reminders-lists))))
+     (list (completing-read "List: " lists nil t))))
   (unless (derived-mode-p 'org-mode)
     (user-error "Not in an org-mode buffer"))
   (let* ((list (or list-name (org-apple-reminders--default-list)))
@@ -1253,6 +1354,8 @@ Run once after upgrading from a version that stored items at level 1."
     (define-key map (kbd "a") #'org-apple-reminders-add)
     (define-key map (kbd "l") #'org-apple-reminders-show-lists)
     (define-key map (kbd "L") #'org-apple-reminders-create-list)
+    (define-key map (kbd "X") #'org-apple-reminders-delete-list)
+    (define-key map (kbd "i") #'org-apple-reminders-set-included-lists)
     (define-key map (kbd "p") #'org-apple-reminders-push-heading)
     (define-key map (kbd "d") #'org-apple-reminders-remove-from-apple)
     (define-key map (kbd "D") #'org-apple-reminders-delete-reminder)
@@ -1280,7 +1383,8 @@ Binds `org-apple-reminders-command-map' under
 
   C-c r R   sync                C-c r a   add reminder
   C-c r f   open sync file      C-c r l   show lists
-  C-c r L   create list         C-c r p   push heading to Apple
+  C-c r L   create list         C-c r X   delete list
+  C-c r i   choose synced lists C-c r p   push heading to Apple
   C-c r d   remove from Apple (keep org heading)
   C-c r D   delete reminder (Apple and org)"
   (when org-apple-reminders-keymap-prefix

@@ -59,7 +59,9 @@ Clone this repository and add it to your load path:
 | `org-apple-reminders-sync-list` | `nil` (auto) | Default Apple list for new org items |
 | `org-apple-reminders-auto-sync-interval` | `300` | Seconds between background pulls (0 = off) |
 | `org-apple-reminders-agenda-file` | `nil` | Optional separate read-only agenda file |
-| `org-apple-reminders-included-lists` | `nil` (all) | Lists to sync; nil means all lists |
+| `org-apple-reminders-included-lists` | `nil` (all) | Config-declared lists to sync; nil means all lists |
+| `org-apple-reminders-included-lists-prefer-config` | `nil` | If non-nil, the config list always wins over the saved one |
+| `org-apple-reminders-saved-included-lists` | `unset` | Set by `C-c r i`, persisted to `custom-file` — don't edit by hand |
 | `org-apple-reminders-extra-files` | `nil` | Extra org files scanned for linked reminder headings |
 | `org-apple-reminders-keymap-prefix` | `"C-c r"` | Prefix key for the command map; `nil` to not bind |
 
@@ -70,6 +72,23 @@ Set `org-apple-reminders-included-lists` to restrict which Apple Reminders lists
 ```
 
 Items already in the org file are always kept in sync; the filter only prevents new Apple items from being pulled into org.
+
+#### Choosing synced lists interactively
+
+`C-c r i` (`org-apple-reminders-set-included-lists`) opens a multi-select over
+your Apple lists — pick the ones to sync, deselect to drop them, pick none for
+"all lists". The choice is saved to `custom-file` so it survives restarts.
+
+There are two values and a switch:
+
+- `org-apple-reminders-included-lists` — what you declare in your init/config.
+- `org-apple-reminders-saved-included-lists` — what `C-c r i` saves.
+- `org-apple-reminders-included-lists-prefer-config` — the switch: `t` → the
+  config value always wins (the saved value is ignored); `nil` (default) → the
+  saved value wins once `C-c r i` has run, with the config value as fallback.
+
+The package picks between them explicitly, so precedence never depends on
+Emacs file-load order.
 
 ### Key bindings
 
@@ -83,6 +102,8 @@ the `C-c r` prefix — no manual `define-key` calls required.
 | `C-c r a` | `org-apple-reminders-add` |
 | `C-c r l` | `org-apple-reminders-show-lists` |
 | `C-c r L` | `org-apple-reminders-create-list` |
+| `C-c r X` | `org-apple-reminders-delete-list` |
+| `C-c r i` | `org-apple-reminders-set-included-lists` |
 | `C-c r p` | `org-apple-reminders-push-heading` |
 | `C-c r d` | `org-apple-reminders-remove-from-apple` |
 | `C-c r D` | `org-apple-reminders-delete-reminder` |
@@ -133,6 +154,8 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 | `org-apple-reminders-delete-reminder` | Delete reminder from Apple **and** org (`C-c r D`) |
 | `org-apple-reminders-show-lists` | List all Apple Reminders lists (`C-c r l`) |
 | `org-apple-reminders-create-list` | Create a new Apple Reminders list (`C-c r L`) |
+| `org-apple-reminders-delete-list` | Delete a whole Apple list **and** its `* ListName` section (`C-c r X`) |
+| `org-apple-reminders-set-included-lists` | Multi-select which lists sync; saved permanently (`C-c r i`) |
 | `org-apple-reminders-migrate-flat-headings` | One-time migration from flat layout |
 
 `org-apple-reminders-push-heading` works in **any** org buffer, not just
@@ -149,15 +172,13 @@ TODO and is never pushed back. Re-link it later with `C-c r p`.
 
 By default every Apple Reminders list is mirrored into org. If you have
 shopping lists, cleaning schedules, or OmniFocus mirrors that you never want
-in org-agenda, use `org-apple-reminders-included-lists` to restrict the sync.
+in org-agenda, restrict the sync to specific lists.
 
-**Step 1** — find your list names:
+**Interactively (recommended)** — press `C-c r i` and multi-select the lists
+to sync. The choice is saved to `custom-file` and survives restarts. See
+[Choosing synced lists interactively](#choosing-synced-lists-interactively).
 
-```
-M-x org-apple-reminders-show-lists
-```
-
-**Step 2** — add to your config (before or inside `use-package :config`):
+**In your config** — set the variable directly:
 
 ```emacs-lisp
 (setq org-apple-reminders-included-lists '("Work" "Personal"))
@@ -165,7 +186,7 @@ M-x org-apple-reminders-show-lists
 
 Only new Apple items from the listed lists will be pulled into org. Items
 already present in the org file (with a `REMINDER_ID`) continue to sync
-bidirectionally regardless of this setting — removing a list from the variable
+bidirectionally regardless of this setting — dropping a list from the set
 does not delete its existing org headings.
 
 Set to `nil` (the default) to sync all lists.
