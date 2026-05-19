@@ -9,6 +9,14 @@ _(nothing in active development)_
 
 ## Done
 
+- **Move on push** — `org-apple-reminders-push-heading` (`C-c r p`) no longer
+  duplicates an already-linked task. Pushing it to its current list updates
+  it in place; pushing it to a different list MOVES it — the old Apple
+  reminder is deleted and recreated in the new list. Inside `reminders.org`
+  the heading's subtree is relocated under the new `* List`; in any other org
+  file the heading keeps its place and only its properties change. Unlinked
+  headings are still created fresh and never moved. ✓ Merged to `main` (v1.7).
+
 - **Delete reminder** (`org-apple-reminders-delete-reminder`) — removes a
   reminder from both Apple and reminders.org in one step. Works directly in
   reminders.org (`C-c r D`). ✓ Merged to `main`.
