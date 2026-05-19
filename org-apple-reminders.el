@@ -757,11 +757,16 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                         (not (eq a-flagged o-flagged))
                                                         (not (equal a-title o-title))
                                                         (not (equal a-notes o-notes)))))
-                                     (when changed
-                                       (push (list (point-marker) rlist
-                                                   a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                                                   a-title o-title a-notes o-notes)
-                                             apple-updates)))
+                                     (if changed
+                                         (push (list (point-marker) rlist
+                                                     a-prio o-prio a-due o-due a-flagged o-flagged a-mod
+                                                     a-title o-title a-notes o-notes)
+                                               apple-updates)
+                                       ;; Apple's modDate advanced but every tracked
+                                       ;; field already matches org — record that this
+                                       ;; modDate is reconciled so org edits can win later.
+                                       (when (stringp a-mod)
+                                         (org-set-property "REMINDER_APPLE_MOD" a-mod))))
                                  (let* ((vals (org-apple-reminders--org-item-values))
                                         (needs-push
                                          (or (not (equal (or (alist-get 'title vals) "")
@@ -779,7 +784,7 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                      (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
                                        (when (stringp new-mod)
                                          (org-set-property "REMINDER_ORG_MOD" new-mod)))
-                                     (setq n-updated (1+ n-updated))))))))))))
+                                     (setq n-updated (1+ n-updated)))))))))))))
                    nil nil)
                   (dolist (m (nreverse done-pts))
                     (goto-char m) (push (point-marker) changed-positions)
@@ -828,14 +833,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
                     (goto-char m) (push (point-marker) changed-positions)
                     (org-todo "TODO") (set-marker m nil)
                     (setq n-reopened (1+ n-reopened)))
-                  ;; Update REMINDER_APPLE_MOD for all entries in this file
-                  (org-map-entries
-                   (lambda ()
-                     (when-let (id (org-entry-get nil "REMINDER_ID"))
-                       (let* ((a  (gethash id apple-by-id))
-                              (md (when a (alist-get 'modDate a))))
-                         (when (stringp md) (org-set-property "REMINDER_APPLE_MOD" md)))))
-                   nil nil)
                   ;; Progress cookies only in sync-file (uses * ListName structure)
                   (when is-sync-file
                     (org-map-entries
@@ -848,7 +845,7 @@ New Apple items not linked in any known file → pulled into sync-file only."
                   (save-buffer)
                   (dolist (m (nreverse changed-positions))
                     (when (marker-position m)
-                      (goto-char m) (org-reveal) (set-marker m nil))))))))))
+                      (goto-char m) (org-reveal) (set-marker m nil)))))))))
       ;; Phase 2: pull new Apple items into sync-file only
       (with-current-buffer (find-file-noselect sync-file)
         (org-save-outline-visibility t
@@ -963,11 +960,16 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                          (last-known (org-apple-reminders--last-known-mod))
                                          (apple-changed (and a-mod (or (null last-known)
                                                                         (string> a-mod last-known)))))
-                                    (when (and changed apple-changed)
-                                      (push (list (point-marker)
-                                                  a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                                                  a-title o-title a-notes o-notes)
-                                            field-updates))))))
+                                    (when apple-changed
+                                      (if changed
+                                          (push (list (point-marker)
+                                                      a-prio o-prio a-due o-due a-flagged o-flagged a-mod
+                                                      a-title o-title a-notes o-notes)
+                                                field-updates)
+                                        ;; modDate advanced but fields already match —
+                                        ;; record reconciliation so org edits can win.
+                                        (when (stringp a-mod)
+                                          (org-set-property "REMINDER_APPLE_MOD" a-mod))))))))
                             nil nil)
                            (dolist (upd (nreverse field-updates))
                              (cl-destructuring-bind (m a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title a-notes o-notes) upd
@@ -1015,14 +1017,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                              (when (stringp md)
                                                (org-set-property "REMINDER_APPLE_MOD" md))))
                                          (puthash id sync-file id-index))))))))
-                           ;; Update REMINDER_APPLE_MOD for all entries in this file
-                           (org-map-entries
-                            (lambda ()
-                              (when-let (id (org-entry-get nil "REMINDER_ID"))
-                                (let* ((a  (gethash id apple-by-id))
-                                       (md (when a (alist-get 'modDate a))))
-                                  (when (stringp md) (org-set-property "REMINDER_APPLE_MOD" md)))))
-                            nil nil)
                            ;; Cookies only in sync-file
                            (when is-sync-file
                              (org-map-entries
