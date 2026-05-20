@@ -9,6 +9,17 @@ _(nothing in active development)_
 
 ## Done
 
+- **Delete-reminder: mark DONE across all known files** (v1.9.3) — `C-c r D`
+  no longer deletes the org heading.  It deletes the Apple reminder, marks
+  the linked org heading as DONE, strips the `REMINDER_*` link properties,
+  and sets `REMINDER_NOSYNC` — both at point and in any other known org
+  file (`extra-files`, `org-agenda-files`) that contains the same
+  `REMINDER_ID`.  The DONE heading is kept so an accidental delete can be
+  recovered: change it back to TODO and `C-c r p` recreates a fresh Apple
+  reminder.  `C-c r d` (`remove-from-apple`) is unchanged.  Defensive
+  `--syncing` binding extended over the full operation in both commands.
+  ✓ Merged to `main` (v1.9.3).
+
 - **GPL boilerplate** (v1.9.2) — add the full short-form GNU GPL-3.0
   notice above `;;; Commentary`, as MELPA's CONTRIBUTING.org requires
   ("The license boilerplate should be applied above the `;;; Commentary`
