@@ -9,6 +9,33 @@ _(nothing in active development)_
 
 ## Done
 
+- **URL field via EventKit** (v1.11) — v1.10 read/wrote the URL field
+  through Apple's scripting dictionary (`r.URL` in JXA), which actually
+  fails on modern macOS: the dictionary advertises the property but its
+  value is not marshallable to JS (and AppleScript hits "can't be read"
+  too).  The URL is reachable only via the **EventKit** framework.
+
+  This release switches both directions of URL sync to EventKit while
+  keeping every other field on the existing fast JXA path:
+  - `--fetch-urls-script` uses `ObjC.import('EventKit')`,
+    `[EKEventStore fetchRemindersMatchingPredicate:completion:]` and
+    returns a JSON id → URL map.  Merged into the main fetch result
+    inside `org-apple-reminders-sync` and the background pull.
+  - `--set-url-template` uses `[EKEventStore calendarItemWithIdentifier:]`
+    and `[EKEventStore saveReminder:commit:error:]` to write URLs back.
+    Called from `--create-in-apple` after a new reminder is created and
+    from `--update-in-apple` alongside every JXA field update.
+
+  EventKit access needs a separate **"Full Access to Reminders"** macOS
+  permission, distinct from the Automation permission JXA uses; the
+  first sync after upgrading pops a one-time dialog.  Granting persists
+  for the calling process identity.  The script polls for the async
+  permission/fetch via `NSRunLoop` with a ~30 s timeout, so a denied
+  permission or a stuck system fails gracefully instead of hanging.
+
+  Replaces the v1.10/v1.10.1 JXA-based URL handling, which was a silent
+  no-op on this user's macOS.  ✓ Merged to `main` (v1.11).
+
 - **URL backfill on sync** (v1.10.1) — `org-apple-reminders-sync`
   (`C-c r R`) now backfills `REMINDER_URL` for already-linked headings
   whose Apple reminder has a URL but whose org heading does not.  The

@@ -4,7 +4,7 @@
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-7
-;; Version: 1.10.1
+;; Version: 1.11
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -486,6 +486,142 @@ JSON.stringify(out);"
   "JXA script returning all Reminders as JSON.
 Uses batch property fetch for speed.")
 
+;; -- URL field via EventKit -------------------------------------------------
+;;
+;; Apple's scripting dictionary doesn't expose the URL field on a reminder
+;; (the dedicated link attachment shown as a globe in the Reminders app).
+;; Both JXA and AppleScript hit "Types cannot be converted" / "can't be read"
+;; on `r.URL'.  The field IS reachable through the EventKit framework, so we
+;; fall back to ObjC.import('EventKit') for read AND write of URL only;
+;; everything else still goes through the fast JXA path above.
+;;
+;; First use will pop a one-time macOS permission dialog asking for "Full
+;; Access to Reminders" — separate from the Automation permission that the
+;; JXA path uses.  Once granted, persists for the calling process identity.
+
+(defconst org-apple-reminders--fetch-urls-script
+  "ObjC.import('EventKit');
+var store=$.EKEventStore.alloc.init;
+var done=false;
+var result={};
+var doFetch=function(){
+  var p=store.predicateForRemindersInCalendars(null);
+  store.fetchRemindersMatchingPredicateCompletion(p,function(rs){
+    if(!rs){done=true;return;}
+    var n=rs.count;
+    for(var i=0;i<n;i++){
+      var r=rs.objectAtIndex(i);
+      try{
+        var u=r.URL;
+        if(u){
+          var s=u.absoluteString;
+          if(s){
+            var id=r.calendarItemExternalIdentifier;
+            if(id){
+              var idJS=String(id),sJS=String(s);
+              if(idJS&&sJS&&sJS.length>0){result[idJS]=sJS;}
+            }
+          }
+        }
+      }catch(e){}
+    }
+    done=true;
+  });
+};
+try{
+  store.requestFullAccessToRemindersWithCompletion(function(g,e){if(g)doFetch();else done=true;});
+}catch(e){
+  try{
+    store.requestAccessToEntityTypeCompletion($.EKEntityTypeReminder,function(g,e){if(g)doFetch();else done=true;});
+  }catch(e2){done=true;}
+}
+var iter=0;
+while(!done&&iter<300){
+  $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
+  iter++;
+}
+JSON.stringify(result);"
+  "EventKit-based JXA script.
+Returns a JSON object mapping reminder external identifier to URL string.
+Used because Apple's scripting dictionary doesn't expose the URL field —
+only EventKit does.  Spins a runloop for up to ~30s while EventKit's async
+fetch completes.")
+
+(defconst org-apple-reminders--set-url-template
+  "ObjC.import('EventKit');
+var store=$.EKEventStore.alloc.init;
+var done=false;
+var success=false;
+var doSet=function(){
+  var r=store.calendarItemWithIdentifier(%s);
+  if(!r){done=true;return;}
+  try{
+    %s
+    var err=Ref();
+    success=store.saveReminderCommitError(r,true,err);
+  }catch(e){}
+  done=true;
+};
+try{
+  store.requestFullAccessToRemindersWithCompletion(function(g,e){if(g)doSet();else done=true;});
+}catch(e){
+  try{
+    store.requestAccessToEntityTypeCompletion($.EKEntityTypeReminder,function(g,e){if(g)doSet();else done=true;});
+  }catch(e2){done=true;}
+}
+var iter=0;
+while(!done&&iter<300){
+  $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
+  iter++;
+}
+JSON.stringify(success);"
+  "EventKit-based JXA template for setting URL on a single reminder.
+Two `%s' placeholders: JSON-encoded reminder ID, then the assignment
+statement (e.g. `r.URL=$.NSURL.URLWithString(\"https://…\");' or
+`r.URL=$();').  Saves via `[EKEventStore saveReminder:commit:error:]'.")
+
+(defun org-apple-reminders--fetch-urls ()
+  "Return hash table mapping Apple reminder ID to URL string (via EventKit).
+Empty table when EventKit is unavailable, permission was denied, or no
+reminder carries a URL.  Permission may prompt the user on first use;
+once granted it persists for the calling process identity."
+  (condition-case nil
+      (json-parse-string
+       (org-apple-reminders--jxa-run org-apple-reminders--fetch-urls-script)
+       :object-type 'hash-table)
+    (error (make-hash-table :test 'equal))))
+
+(defun org-apple-reminders--set-url-in-apple (id url)
+  "Set the URL field on Apple reminder ID via EventKit.
+A nil or empty URL clears the field.  Return t on success, nil on failure
+or denied permission.  Used by `org-apple-reminders--create-in-apple' and
+`org-apple-reminders--update-in-apple' because Apple's scripting dictionary
+doesn't expose the URL field on modern macOS."
+  (let* ((set-form
+          (if (and (stringp url) (not (string-empty-p url)))
+              (format "r.URL=$.NSURL.URLWithString(%s);" (json-encode url))
+            "r.URL=$();"))
+         (script (format org-apple-reminders--set-url-template
+                         (json-encode id) set-form)))
+    (condition-case nil
+        (eq t (json-parse-string (org-apple-reminders--jxa-run script)))
+      (error nil))))
+
+(defun org-apple-reminders--merge-urls (data)
+  "Destructively merge EventKit URL data into DATA, the JXA fetch result.
+For each item alist DATA contains, set (url . VAL) when EventKit reports
+a URL for that REMINDER_ID.  Items without a URL are left untouched.
+Returns DATA so callers can use it inside a `let*' binding."
+  (let ((url-map (org-apple-reminders--fetch-urls)))
+    (when (and url-map (> (hash-table-count url-map) 0))
+      (dolist (entry data)
+        (dolist (item (alist-get 'items entry))
+          (let* ((id (alist-get 'id item))
+                 (u  (gethash id url-map)))
+            (when (stringp u)
+              (setf (alist-get 'url item) u)))))))
+  data)
+
 (defun org-apple-reminders--complete-in-apple (list-name id)
   "Mark Apple reminder ID in LIST-NAME as completed (async)."
   (org-apple-reminders--jxa-async
@@ -501,7 +637,10 @@ Uses batch property fetch for speed.")
 
 (defun org-apple-reminders--create-in-apple (list-name vals)
   "Create Apple reminder in LIST-NAME from VALS alist.
-Return new ID string or nil."
+Return new ID string or nil.
+If VALS carries a non-empty URL, set it on the new reminder via EventKit
+after the JXA create returns (the URL field isn't reachable via Apple's
+scripting dictionary)."
   (let* ((title   (alist-get 'title    vals ""))
          (notes   (alist-get 'notes    vals ""))
          (prio    (alist-get 'priority vals 0))
@@ -512,8 +651,7 @@ Return new ID string or nil."
           (format
            "var app=Application('Reminders'),list=app.lists.byName(%s);
 var prev=list.reminders.id();
-var r=app.Reminder({name:%s,body:%s,priority:%d,flagged:%s%s});
-list.reminders.push(r);%s
+list.reminders.push(app.Reminder({name:%s,body:%s,priority:%d,flagged:%s%s}));
 var next=list.reminders.id(),newId=null;
 for(var i=0;i<next.length;i++){if(prev.indexOf(next[i])<0){newId=next[i];break;}}
 JSON.stringify(newId);"
@@ -521,23 +659,21 @@ JSON.stringify(newId);"
            (json-encode title) (json-encode notes) prio
            (if flagged "true" "false")
            (if due (format ",dueDate:new Date(%s)"
-                           (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))) "")
-           ;; URL must be set on the live reminder after push (the constructor
-           ;; doesn't accept it directly in some Reminders versions); use a
-           ;; try/catch so older systems silently no-op.
-           (if (and (stringp url) (not (string-empty-p url)))
-               (format "try{r.URL=%s;}catch(e){try{r.url=%s;}catch(e2){}}"
-                       (json-encode url) (json-encode url))
-             ""))))
-    (condition-case nil
-        (json-parse-string (org-apple-reminders--jxa-run script))
-      (error nil))))
+                           (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))) "")))
+         (new-id (condition-case nil
+                     (json-parse-string (org-apple-reminders--jxa-run script))
+                   (error nil))))
+    (when (and new-id (stringp url) (not (string-empty-p url)))
+      (org-apple-reminders--set-url-in-apple new-id url))
+    new-id))
 
 (defun org-apple-reminders--update-in-apple (list-name id vals &optional callback)
   "Push VALS alist to Apple reminder ID in LIST-NAME.
 Without CALLBACK: synchronous; returns Apple's modificationDate after the
 push, or nil.
-With CALLBACK: async; CALLBACK receives the modificationDate string."
+With CALLBACK: async; CALLBACK receives the modificationDate string.
+URL is set via EventKit alongside the JXA field update — the URL field
+isn't reachable via Apple's scripting dictionary."
   (let* ((title   (alist-get 'title    vals ""))
          (notes   (alist-get 'notes    vals ""))
          (prio    (alist-get 'priority vals 0))
@@ -547,7 +683,7 @@ With CALLBACK: async; CALLBACK receives the modificationDate string."
          (script
           (format
            "var r=Application('Reminders').lists.byName(%s).reminders.byId(%s);
-r.name=%s;r.body=%s;r.priority=%d;r.flagged=%s;%s%s
+r.name=%s;r.body=%s;r.priority=%d;r.flagged=%s;%s
 var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOString():null);"
            (json-encode list-name) (json-encode id)
            (json-encode title) (json-encode notes) prio
@@ -555,14 +691,12 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
            (if due
                (format "r.dueDate=new Date(%s);"
                        (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00"))))
-             "r.dueDate=null;")
-           ;; URL: set if non-empty, clear (to empty string) when nil.  Older
-           ;; Reminders versions may not expose the field; try/catch keeps the
-           ;; rest of the update working in that case.
-           (if (and (stringp url) (not (string-empty-p url)))
-               (format "try{r.URL=%s;}catch(e){try{r.url=%s;}catch(e2){}}"
-                       (json-encode url) (json-encode url))
-             "try{r.URL=\"\";}catch(e){try{r.url=\"\";}catch(e2){}}"))))
+             "r.dueDate=null;"))))
+    ;; URL via EventKit (the only path that actually works on macOS where
+    ;; Apple's scripting dictionary doesn't expose the field).  Runs
+    ;; synchronously; failure is silent.  When `url' is nil/empty the field
+    ;; is cleared on the Apple side.
+    (org-apple-reminders--set-url-in-apple id url)
     (if callback
         (org-apple-reminders--jxa-async
          script
@@ -1286,6 +1420,12 @@ New Apple items not linked in any known file → pulled into sync-file only."
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
          (n-pruned 0))
+    ;; Merge URL field from EventKit — Apple Events scripting doesn't
+    ;; expose it, so the JXA fetch above only sets `url' to nil.  EventKit
+    ;; fills it in here, before any of the Phase 1 / Phase 2 logic reads
+    ;; from `data' or `apple-by-id'.  Items in `apple-by-id' share the
+    ;; same alist objects as `data', so this single call updates both.
+    (org-apple-reminders--merge-urls data)
     (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
@@ -1535,6 +1675,8 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                       (puthash (alist-get 'id item) item ht)))
                                   ht))
                   (id-index     (org-apple-reminders--build-id-index)))
+             ;; Merge URL field from EventKit (see `org-apple-reminders-sync').
+             (org-apple-reminders--merge-urls data)
              (setq org-apple-reminders--cache data)
              (org-apple-reminders--write-agenda-file data)
              (let ((org-apple-reminders--syncing t))
