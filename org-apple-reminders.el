@@ -4,7 +4,7 @@
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-7
-;; Version: 1.12
+;; Version: 1.13
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -34,7 +34,7 @@
 ;;   - Conflict resolution via dual timestamps
 ;;     (REMINDER_APPLE_MOD vs REMINDER_ORG_MOD)
 ;;   - Fields synced: title, due date + time, priority (A/B/C <-> 1/5/9),
-;;     flagged/starred, notes; the URL field is opt-in (see Helper below)
+;;     flagged/starred, notes
 ;;   - Selective list sync via `org-apple-reminders-included-lists'
 ;;   - Push any org heading, or a whole region of headings, to Apple;
 ;;     move reminders between lists without duplicating them
@@ -56,19 +56,6 @@
 ;;
 ;; Then press C-c r R to run a full sync.
 ;; See the README for full installation instructions and key bindings.
-;;
-;; URL field (optional):
-;;
-;;   Apple's scripting dictionary doesn't expose the URL field, so URL sync
-;;   is opt-in via a tiny signed Swift helper.  Run, once:
-;;
-;;     M-x org-apple-reminders-install-helper
-;;
-;;   This compiles a ~50-line Swift helper using `swiftc' (Xcode Command
-;;   Line Tools, prompted if missing), ad-hoc-signs it, and caches it under
-;;   `user-emacs-directory'.  The next sync pops a one-time macOS dialog
-;;   asking for \"Full Access to Reminders\".  URL sync no-ops gracefully
-;;   if you skip this step.
 
 ;;; Code:
 
@@ -450,11 +437,9 @@ Strips LOGBOOK drawers and per-line leading whitespace."
                         ((eql prio-char ?C) 9)
                         (t 0)))
            (flagged (if (member "flagged" (org-get-tags nil t)) t nil))
-           (notes   (org-apple-reminders--extract-notes))
-           (url     (let ((u (org-entry-get nil "REMINDER_URL")))
-                      (and (stringp u) (not (string-empty-p u)) u))))
+           (notes   (org-apple-reminders--extract-notes)))
       `((title . ,title) (due . ,due) (priority . ,prio)
-        (flagged . ,flagged) (notes . ,notes) (url . ,url)))))
+        (flagged . ,flagged) (notes . ,notes)))))
 
 (defun org-apple-reminders--prio-label (p)
   "Return org priority prefix string for Apple priority integer P."
@@ -482,15 +467,12 @@ app.lists().forEach(function(l){
   var names=rs.name(),ids=rs.id(),bodies=rs.body(),
       dates=rs.dueDate(),prios=rs.priority(),flags=rs.flagged(),compl=rs.completed(),
       mods=rs.modificationDate();
-  var urls=null;
-  try{urls=rs.URL();}catch(e){try{urls=rs.url();}catch(e2){urls=null;}}
   var items=[];
   for(var i=0;i<names.length;i++){
-    var d=dates[i],md=mods[i],u=urls&&urls[i];
+    var d=dates[i],md=mods[i];
     items.push({id:ids[i],title:names[i],notes:bodies[i]||'',
                 due:(d&&d instanceof Date&&!isNaN(d)&&d.getFullYear()>1970)?(function(){var ds=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');var h=d.getHours(),m=d.getMinutes();return(h||m)?ds+'T'+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'):ds;}()):null,
                 priority:prios[i],flagged:flags[i],completed:!!compl[i],
-                url:(typeof u==='string'&&u.length>0)?u:null,
                 modDate:(md&&md instanceof Date&&!isNaN(md))?md.toISOString():null});
   }
   out.push({list:l.name(),items:items});
@@ -498,268 +480,6 @@ app.lists().forEach(function(l){
 JSON.stringify(out);"
   "JXA script returning all Reminders as JSON.
 Uses batch property fetch for speed.")
-
-;; -- URL field via signed Swift helper --------------------------------------
-;;
-;; Apple's scripting dictionary doesn't expose the URL field on a reminder
-;; (the dedicated link attachment shown as a globe in the Reminders app), and
-;; on macOS 14+ EventKit's `requestFullAccessToReminders' requires the calling
-;; binary to declare `NSRemindersFullAccessUsageDescription' in its Info.plist
-;; and be code-signed.  `/usr/bin/osascript' declares neither, so the only
-;; working path is a small Swift helper that we compile once and ad-hoc-sign.
-;;
-;; The Swift source and Info.plist are embedded as string defconsts below; on
-;; first use the user runs M-x `org-apple-reminders-install-helper', which
-;; writes them to a temp dir, invokes `swiftc' (Xcode Command Line Tools), and
-;; caches the resulting signed binary under `user-emacs-directory'.  The first
-;; sync after that triggers macOS's one-time "Full Access to Reminders" TCC
-;; dialog; once granted it persists for the binary's signature identity.
-;;
-;; If the binary is absent, URL sync silently no-ops — `--fetch-urls' returns
-;; an empty hash table and `--set-url-in-apple' returns nil.  Sync stays fast
-;; and no JXA EventKit timeouts occur.
-
-(defconst org-apple-reminders--helper-swift-source
-  "// org-apple-reminders-helper — reads/writes the URL field of Apple
-// Reminders via EventKit.  Compiled and ad-hoc-signed on first use.
-import Foundation
-import EventKit
-
-let store = EKEventStore()
-let group = DispatchGroup()
-var granted = false
-var grantError: Error?
-
-group.enter()
-if #available(macOS 14.0, *) {
-    store.requestFullAccessToReminders { ok, err in
-        granted = ok; grantError = err; group.leave()
-    }
-} else {
-    store.requestAccess(to: .reminder) { ok, err in
-        granted = ok; grantError = err; group.leave()
-    }
-}
-group.wait()
-
-if !granted {
-    FileHandle.standardError.write(
-        \"ERROR: Reminders access not granted: \\(grantError?.localizedDescription ?? \"(no error)\")\\n\"
-            .data(using: .utf8)!)
-    exit(2)
-}
-
-let args = CommandLine.arguments
-guard args.count >= 2 else {
-    FileHandle.standardError.write(
-        \"Usage: org-apple-reminders-helper fetch-urls | set-url ID URL\\n\".data(using: .utf8)!)
-    exit(64)
-}
-
-switch args[1] {
-
-case \"fetch-urls\":
-    let cals = store.calendars(for: .reminder)
-    let predicate = store.predicateForReminders(in: cals)
-    var result: [String: String] = [:]
-    let fetchGroup = DispatchGroup()
-    fetchGroup.enter()
-    store.fetchReminders(matching: predicate) { reminders in
-        if let rs = reminders {
-            for r in rs {
-                if let url = r.url?.absoluteString {
-                    result[r.calendarItemExternalIdentifier] = url
-                }
-            }
-        }
-        fetchGroup.leave()
-    }
-    fetchGroup.wait()
-    let data = try! JSONSerialization.data(withJSONObject: result, options: [])
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write(\"\\n\".data(using: .utf8)!)
-
-case \"set-url\":
-    guard args.count == 4 else {
-        FileHandle.standardError.write(
-            \"Usage: org-apple-reminders-helper set-url ID URL\\n\".data(using: .utf8)!)
-        exit(64)
-    }
-    let id = args[2]
-    let urlStr = args[3]
-    guard let item = store.calendarItem(withIdentifier: id) as? EKReminder else {
-        FileHandle.standardError.write(\"ERROR: reminder \\(id) not found\\n\".data(using: .utf8)!)
-        exit(3)
-    }
-    if urlStr.isEmpty {
-        item.url = nil
-    } else {
-        item.url = URL(string: urlStr)
-    }
-    do {
-        try store.save(item, commit: true)
-        print(\"OK\")
-    } catch {
-        FileHandle.standardError.write(\"ERROR: \\(error.localizedDescription)\\n\".data(using: .utf8)!)
-        exit(4)
-    }
-
-default:
-    FileHandle.standardError.write(\"Unknown subcommand: \\(args[1])\\n\".data(using: .utf8)!)
-    exit(64)
-}
-"
-  "Swift source for the EventKit helper.
-Written to a temp file by `org-apple-reminders--helper-build' and compiled
-via `swiftc'.  The resulting binary embeds `Info.plist' in its
-`__TEXT,__info_plist' section so macOS TCC honors
-`NSRemindersFullAccessUsageDescription' on macOS 14+.")
-
-(defconst org-apple-reminders--helper-info-plist
-  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.deno1011.org-apple-reminders-helper</string>
-    <key>CFBundleName</key>
-    <string>org-apple-reminders-helper</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>NSRemindersUsageDescription</key>
-    <string>Read and write Apple Reminders URL fields from Emacs (org-apple-reminders).</string>
-    <key>NSRemindersFullAccessUsageDescription</key>
-    <string>Read and write Apple Reminders URL fields from Emacs (org-apple-reminders).</string>
-</dict>
-</plist>
-"
-  "Info.plist source linked into the helper binary's `__TEXT,__info_plist'
-section by `swiftc'.  Provides the macOS 14+ Reminders usage description
-keys needed for TCC to grant full access.")
-
-(defun org-apple-reminders--helper-binary-path ()
-  "Return the absolute path where the compiled helper binary is cached."
-  (expand-file-name "org-apple-reminders/org-apple-reminders-helper"
-                    user-emacs-directory))
-
-(defun org-apple-reminders--helper-available-p ()
-  "Return non-nil iff the helper binary exists and is executable."
-  (let ((p (org-apple-reminders--helper-binary-path)))
-    (and (file-exists-p p) (file-executable-p p))))
-
-(defun org-apple-reminders--helper-build ()
-  "Compile and ad-hoc-sign the helper binary.
-Writes the embedded Swift source and Info.plist to a temp dir, invokes
-`swiftc' with `-Xlinker -sectcreate __TEXT __info_plist Info.plist' so the
-Info.plist is bound into the binary, then `codesign -s - --force' to
-ad-hoc-sign so macOS TCC honors the bound Info.plist.  Returns the binary
-path on success, signals `user-error' on failure."
-  (unless (executable-find "swiftc")
-    (user-error
-     "swiftc not found — install Xcode Command Line Tools (`xcode-select --install')"))
-  (let* ((out      (org-apple-reminders--helper-binary-path))
-         (out-dir  (file-name-directory out))
-         (tmpdir   (make-temp-file "org-apple-reminders-helper-" t))
-         (src      (expand-file-name "helper.swift" tmpdir))
-         (plist    (expand-file-name "Info.plist"   tmpdir))
-         (buf      (get-buffer-create " *org-apple-reminders-helper-build*")))
-    (with-current-buffer buf (erase-buffer))
-    (make-directory out-dir t)
-    (with-temp-file src   (insert org-apple-reminders--helper-swift-source))
-    (with-temp-file plist (insert org-apple-reminders--helper-info-plist))
-    (unwind-protect
-        (let ((rc-build
-               (call-process "swiftc" nil buf nil
-                             "-O"
-                             "-Xlinker" "-sectcreate"
-                             "-Xlinker" "__TEXT"
-                             "-Xlinker" "__info_plist"
-                             "-Xlinker" plist
-                             "-o" out
-                             src)))
-          (unless (eq rc-build 0)
-            (user-error "swiftc failed (see buffer %s)" (buffer-name buf)))
-          (let ((rc-sign
-                 (call-process "codesign" nil buf nil
-                               "-s" "-" "--force" out)))
-            (unless (eq rc-sign 0)
-              (user-error "codesign failed (see buffer %s)" (buffer-name buf))))
-          (unless (file-executable-p out)
-            (user-error "helper binary not executable after build"))
-          out)
-      (delete-directory tmpdir t))))
-
-;;;###autoload
-(defun org-apple-reminders-install-helper ()
-  "Build and install the URL-field helper binary.
-The URL field of an Apple Reminder is only reachable via EventKit, which
-on macOS 14+ requires the calling binary to declare
-`NSRemindersFullAccessUsageDescription' in its Info.plist AND be
-code-signed.  This command writes the embedded Swift source to a temp
-dir, compiles it with `swiftc', ad-hoc-signs it, and caches the binary
-under `user-emacs-directory'.  Requires Xcode Command Line Tools.
-After install, the first sync will trigger a one-time macOS TCC dialog
-asking for \"Full Access to Reminders\"; click Allow."
-  (interactive)
-  (cond
-   ((not (eq system-type 'darwin))
-    (user-error "org-apple-reminders helper is macOS-only"))
-   ((not (executable-find "swiftc"))
-    (when (yes-or-no-p
-           "swiftc not found.  Install Xcode Command Line Tools now? ")
-      (call-process "xcode-select" nil nil nil "--install"))
-    (user-error
-     "Re-run M-x org-apple-reminders-install-helper after Command Line Tools install completes"))
-   (t
-    (message "Building org-apple-reminders helper...")
-    (let ((path (org-apple-reminders--helper-build)))
-      (message "Helper installed at %s — next sync will prompt for Reminders access"
-               path)))))
-
-(defun org-apple-reminders--fetch-urls ()
-  "Return hash table mapping Apple reminder ID to URL string.
-Calls the cached helper binary's `fetch-urls' subcommand.  Returns an
-empty hash table when the helper isn't installed, permission was denied,
-or no reminder carries a URL.  Run M-x `org-apple-reminders-install-helper'
-once to install the helper."
-  (if (not (org-apple-reminders--helper-available-p))
-      (make-hash-table :test 'equal)
-    (condition-case nil
-        (with-temp-buffer
-          (let ((rc (call-process (org-apple-reminders--helper-binary-path)
-                                  nil t nil "fetch-urls")))
-            (if (eq rc 0)
-                (json-parse-string (buffer-string) :object-type 'hash-table)
-              (make-hash-table :test 'equal))))
-      (error (make-hash-table :test 'equal)))))
-
-(defun org-apple-reminders--set-url-in-apple (id url)
-  "Set the URL field on Apple reminder ID via the helper binary.
-A nil or empty URL clears the field.  Return t on success, nil on
-failure or when the helper isn't installed."
-  (when (org-apple-reminders--helper-available-p)
-    (condition-case nil
-        (eq 0 (call-process (org-apple-reminders--helper-binary-path)
-                            nil nil nil
-                            "set-url" id (or url "")))
-      (error nil))))
-
-(defun org-apple-reminders--merge-urls (data)
-  "Destructively merge helper-fetched URL data into DATA, the JXA fetch result.
-For each item alist DATA contains, set (url . VAL) when the helper reports
-a URL for that REMINDER_ID.  Items without a URL are left untouched.
-Returns DATA so callers can use it inside a `let*' binding.  No-op when
-the helper isn't installed."
-  (when (org-apple-reminders--helper-available-p)
-    (let ((url-map (org-apple-reminders--fetch-urls)))
-      (when (and url-map (> (hash-table-count url-map) 0))
-        (dolist (entry data)
-          (dolist (item (alist-get 'items entry))
-            (let* ((id (alist-get 'id item))
-                   (u  (gethash id url-map)))
-              (when (stringp u)
-                (setf (alist-get 'url item) u))))))))
-  data)
 
 (defun org-apple-reminders--complete-in-apple (list-name id)
   "Mark Apple reminder ID in LIST-NAME as completed (async)."
@@ -776,16 +496,12 @@ the helper isn't installed."
 
 (defun org-apple-reminders--create-in-apple (list-name vals)
   "Create Apple reminder in LIST-NAME from VALS alist.
-Return new ID string or nil.
-If VALS carries a non-empty URL, set it on the new reminder via EventKit
-after the JXA create returns (the URL field isn't reachable via Apple's
-scripting dictionary)."
+Return new ID string or nil."
   (let* ((title   (alist-get 'title    vals ""))
          (notes   (alist-get 'notes    vals ""))
          (prio    (alist-get 'priority vals 0))
          (due     (alist-get 'due      vals))
          (flagged (alist-get 'flagged  vals))
-         (url     (alist-get 'url      vals))
          (script
           (format
            "var app=Application('Reminders'),list=app.lists.byName(%s);
@@ -798,28 +514,21 @@ JSON.stringify(newId);"
            (json-encode title) (json-encode notes) prio
            (if flagged "true" "false")
            (if due (format ",dueDate:new Date(%s)"
-                           (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))) "")))
-         (new-id (condition-case nil
-                     (json-parse-string (org-apple-reminders--jxa-run script))
-                   (error nil))))
-    ;; Push the URL field via the helper binary.  No-op when the helper
-    ;; isn't installed.  Run M-x `org-apple-reminders-install-helper'.
-    (when (and new-id (stringp url) (not (string-empty-p url)))
-      (org-apple-reminders--set-url-in-apple new-id url))
-    new-id))
+                           (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))) ""))))
+    (condition-case nil
+        (json-parse-string (org-apple-reminders--jxa-run script))
+      (error nil))))
 
 (defun org-apple-reminders--update-in-apple (list-name id vals &optional callback)
   "Push VALS alist to Apple reminder ID in LIST-NAME.
 Without CALLBACK: synchronous; returns Apple's modificationDate after the
 push, or nil.
-With CALLBACK: async; CALLBACK receives the modificationDate string.
-The URL field is pushed via the signed Swift helper (no-op without it)."
+With CALLBACK: async; CALLBACK receives the modificationDate string."
   (let* ((title   (alist-get 'title    vals ""))
          (notes   (alist-get 'notes    vals ""))
          (prio    (alist-get 'priority vals 0))
          (due     (alist-get 'due      vals))
          (flagged (alist-get 'flagged  vals))
-         (url     (alist-get 'url      vals))
          (script
           (format
            "var r=Application('Reminders').lists.byName(%s).reminders.byId(%s);
@@ -832,9 +541,6 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
                (format "r.dueDate=new Date(%s);"
                        (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00"))))
              "r.dueDate=null;"))))
-    ;; Push the URL field via the helper binary.  No-op when the helper
-    ;; isn't installed.  When `url' is nil/empty, the field is cleared.
-    (org-apple-reminders--set-url-in-apple id url)
     (if callback
         (org-apple-reminders--jxa-async
          script
@@ -1370,9 +1076,7 @@ Tidies sections that earlier versions inserted flush against each other."
          (notes   (alist-get 'notes    item))
          (due     (alist-get 'due      item))
          (prio    (alist-get 'priority item))
-         (flagged (alist-get 'flagged  item))
-         (url     (let ((u (alist-get 'url item)))
-                    (and (stringp u) (not (string-empty-p u)) u))))
+         (flagged (alist-get 'flagged  item)))
     (unless (bolp) (insert "\n"))
     (insert (format "** TODO %s%s%s\n"
                     (org-apple-reminders--prio-label prio)
@@ -1383,8 +1087,6 @@ Tidies sections that earlier versions inserted flush against each other."
     (insert "   :PROPERTIES:\n")
     (insert (format "   :REMINDER_ID:   %s\n" id))
     (insert (format "   :REMINDER_LIST: %s\n" list-name))
-    (when url
-      (insert (format "   :REMINDER_URL:  %s\n" url)))
     (insert "   :END:\n")
     (when (and (stringp notes) (not (string-empty-p notes)))
       (dolist (line (split-string notes "\n"))
@@ -1494,10 +1196,7 @@ other linked files only push updates to already-stamped headings."
                                    (let ((d (alist-get 'due cached)))
                                      (and (stringp d) (not (string-empty-p d)) d))))
                        (not (eq (alist-get 'flagged vals)
-                                (eq (alist-get 'flagged cached) t)))
-                       (not (equal (or (alist-get 'url vals) "")
-                                   (let ((u (alist-get 'url cached)))
-                                     (or (and (stringp u) u) "")))))))
+                                (eq (alist-get 'flagged cached) t))))))
              (when needs-push
                ;; Async update — capture position for the callback to stamp REMINDER_ORG_MOD
                (let ((m (point-marker)))
@@ -1558,11 +1257,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
          (n-pruned 0))
-    ;; Merge URL field from the signed Swift helper.  No-op when the helper
-    ;; isn't installed (sync stays fast; URLs simply don't appear in
-    ;; `REMINDER_URL' properties).  Items in `apple-by-id' share the same
-    ;; alist objects as `data', so this single call updates both.
-    (org-apple-reminders--merge-urls data)
     (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
@@ -1586,22 +1280,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
                          (push (point-marker) new-pts))
                         (id
                          (let ((apple (gethash id apple-by-id)))
-                           ;; Backfill missing REMINDER_URL from Apple.  Runs
-                           ;; outside the modDate gate because the URL field
-                           ;; is newer than the conflict-resolution code: a
-                           ;; URL added in Apple before v1.10 would otherwise
-                           ;; never trigger an apple-wins pull and the
-                           ;; property would stay missing forever.  The
-                           ;; backfill only sets, never overrides — once the
-                           ;; property exists, normal conflict resolution
-                           ;; takes over.
-                           (let ((a-url (and apple (alist-get 'url apple)))
-                                 (o-url (org-entry-get nil "REMINDER_URL")))
-                             (when (and (stringp a-url)
-                                        (not (string-empty-p a-url))
-                                        (or (null o-url)
-                                            (string-empty-p o-url)))
-                               (org-set-property "REMINDER_URL" a-url)))
                            (cond
                             ((and (member state '("DONE" "CANCELLED"))
                                   apple (not (eq (alist-get 'completed apple) t)))
@@ -1628,8 +1306,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                           (a-flagged (eq (alist-get 'flagged apple) t))
                                           (a-title  (or (alist-get 'title apple) ""))
                                           (a-notes  (or (alist-get 'notes apple) ""))
-                                          (a-url    (let ((u (alist-get 'url apple)))
-                                                      (and (stringp u) (not (string-empty-p u)) u)))
                                           (p-char   (nth 3 (org-heading-components)))
                                           (o-prio   (cond ((eql p-char ?A) 1)
                                                           ((eql p-char ?B) 5)
@@ -1643,18 +1319,15 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                           (o-title  (replace-regexp-in-string
                                                      "^★ " "" (org-get-heading t t t t)))
                                           (o-notes  (org-apple-reminders--extract-notes))
-                                          (o-url    (let ((u (org-entry-get nil "REMINDER_URL")))
-                                                      (and (stringp u) (not (string-empty-p u)) u)))
                                           (changed  (or (/= a-prio o-prio)
                                                         (not (equal a-due o-due))
                                                         (not (eq a-flagged o-flagged))
                                                         (not (equal a-title o-title))
-                                                        (not (equal a-notes o-notes))
-                                                        (not (equal a-url o-url)))))
+                                                        (not (equal a-notes o-notes)))))
                                      (if changed
                                          (push (list (point-marker) rlist
                                                      a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                                                     a-title o-title a-notes o-notes a-url o-url)
+                                                     a-title o-title a-notes o-notes)
                                                apple-updates)
                                        ;; Apple's modDate advanced but every tracked
                                        ;; field already matches org — record that this
@@ -1673,10 +1346,7 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                          (let ((d (alist-get 'due apple)))
                                                            (and (stringp d) (not (string-empty-p d)) d))))
                                              (not (eq (alist-get 'flagged vals)
-                                                      (eq (alist-get 'flagged apple) t)))
-                                             (not (equal (or (alist-get 'url vals) "")
-                                                         (let ((u (alist-get 'url apple)))
-                                                           (or (and (stringp u) u) "")))))))
+                                                      (eq (alist-get 'flagged apple) t))))))
                                    (when needs-push
                                      (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
                                        (when (stringp new-mod)
@@ -1701,7 +1371,7 @@ New Apple items not linked in any known file → pulled into sync-file only."
                   (dolist (upd (nreverse apple-updates))
                     (cl-destructuring-bind
                         (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                           a-title o-title a-notes o-notes a-url o-url)
+                           a-title o-title a-notes o-notes)
                         upd
                       (goto-char m) (push (point-marker) changed-positions)
                       (unless (equal a-title o-title)
@@ -1726,10 +1396,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
                         (org-toggle-tag "flagged" (if a-flagged 'on 'off)))
                       (unless (equal a-notes o-notes)
                         (org-apple-reminders--set-org-notes a-notes))
-                      (unless (equal a-url o-url)
-                        (if a-url
-                            (org-set-property "REMINDER_URL" a-url)
-                          (org-entry-delete nil "REMINDER_URL")))
                       (when (stringp a-mod) (org-set-property "REMINDER_APPLE_MOD" a-mod))
                       (setq n-updated (1+ n-updated))
                       (set-marker m nil)))
@@ -1812,8 +1478,6 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                       (puthash (alist-get 'id item) item ht)))
                                   ht))
                   (id-index     (org-apple-reminders--build-id-index)))
-             ;; URL field sync via helper (see `org-apple-reminders-sync').
-             (org-apple-reminders--merge-urls data)
              (setq org-apple-reminders--cache data)
              (org-apple-reminders--write-agenda-file data)
              (let ((org-apple-reminders--syncing t))

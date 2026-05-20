@@ -9,102 +9,52 @@ _(nothing in active development)_
 
 ## Done
 
-- **URL field via signed Swift helper** (v1.12) — finishes what v1.10 / v1.11
-  / v1.11.1 couldn't through `osascript` alone: a tiny (~80 line) Swift
-  helper is shipped as embedded source inside `org-apple-reminders.el`
-  itself, and on first use the new interactive command
+- **URL field sync removed** (v1.13) — Five attempts (v1.10, v1.10.1,
+  v1.11, v1.11.1, v1.12) tried to round-trip Apple Reminders' "link"
+  attachment (the globe icon shown on a reminder card).  Each attempt
+  was technically clean but observationally broken:
 
-      M-x org-apple-reminders-install-helper
+  - **v1.10** read/wrote via JXA's `r.URL`.  On modern macOS the
+    scripting dictionary advertises the property but refuses to marshal
+    its value ("Types cannot be converted") and AppleScript hits
+    `-1728 can't be read`.
+  - **v1.10.1** added a backfill path so URLs visible in Apple before
+    install would be picked up; same JXA failure.
+  - **v1.11** moved to EventKit via the JXA→ObjC bridge.  On macOS 14+
+    `requestFullAccessToReminders` silently never fires its callback
+    because `/usr/bin/osascript` declares neither
+    `NSRemindersFullAccessUsageDescription` nor a Reminders entitlement.
+    Added ~30 s lag per sync from the runloop timeout.
+  - **v1.11.1** disabled the EventKit calls in sync paths to restore
+    sub-second performance while keeping the dead code in place.
+  - **v1.12** shipped a compiled, ad-hoc-signed Swift helper with the
+    correct Info.plist as embedded source.  `swiftc` + `codesign` ran
+    cleanly; macOS TCC granted `fullAccess`; `fetchReminders` returned
+    every reminder.  But `EKReminder.url` was `nil` on every reminder,
+    including those the Reminders.app UI clearly showed as having a
+    URL attachment.  Writing to `EKReminder.url` from EventKit
+    succeeded silently — the value persisted in EventKit and survived
+    a read — but **the Reminders.app did not display it**, and the
+    user's original URL stayed visible alongside.  Verified by writing
+    a distinctive marker URL and inspecting the app: both visible
+    URLs were the user's; the marker was invisible.
 
-  writes the source + Info.plist to a temp dir, calls `swiftc` with
-  `-Xlinker -sectcreate __TEXT __info_plist <plist>` so the Info.plist
-  is linked into the binary's `__TEXT,__info_plist` section, ad-hoc-signs
-  the binary so macOS TCC honors the bound Info.plist, and caches the
-  result under `user-emacs-directory`.  The bound Info.plist carries
-  both `NSRemindersUsageDescription` (legacy macOS) and
-  `NSRemindersFullAccessUsageDescription` (macOS 14+), the latter being
-  what makes `EKEventStore.requestFullAccessToReminders` actually fire
-  its completion callback and grant full read access.
+  Conclusion: Apple stores user-added URLs in a private location
+  outside any public scripting / EventKit interface.  `EKReminder.url`
+  is a distinct field the Reminders app neither reads nor displays.
+  There is no public path on current macOS, so v1.13 removes all URL
+  handling — the `REMINDER_URL` property is no longer written, the
+  helper command, the embedded Swift source, the EventKit defconsts,
+  the JXA URL extraction, and every conflict-resolution branch that
+  touched URLs are all gone.  Existing `REMINDER_URL` properties in
+  user org files are left untouched (will not be deleted), they just
+  stop syncing.
 
-  Wire-in:
-  - `--fetch-urls` shells out to `<binary> fetch-urls` → JSON map.
-  - `--set-url-in-apple` shells out to `<binary> set-url ID URL`.
-  - `--merge-urls` injects the map into `org-apple-reminders-sync` and
-    `--background-pull` results.
-  - `--create-in-apple` / `--update-in-apple` push URLs after the JXA
-    field update.
-  - Every step no-ops gracefully when the binary is absent, so URL sync
-    is opt-in: skip `install-helper` and the package behaves exactly
-    like v1.9 (no URL sync, no lag).
-
-  Requires Xcode Command Line Tools.  `install-helper` offers to run
-  `xcode-select --install` if `swiftc` is missing.  Pure-Lisp from a
-  MELPA perspective: the Swift source and Info.plist live as string
-  defconsts in the `.el` file, so no recipe changes are needed.
-  ✓ Merged to `main` (v1.12).
-
-- **URL field sync disabled** (v1.11.1) — empirical testing on macOS 14+
-  showed v1.11's EventKit approach can't work through `/usr/bin/osascript`:
-  the binary's Info.plist declares neither
-  `NSRemindersFullAccessUsageDescription` nor any Reminders entitlement,
-  so `requestFullAccessToRemindersWithCompletion:` silently never fires
-  its callback (adding ~30 s per sync waiting for the runloop timeout),
-  and the legacy `requestAccessToEntityType:` grants WRITE-ONLY access
-  on macOS 14+ — `r.URL` reads as `null` for every reminder.  This
-  release stops calling EventKit in `org-apple-reminders-sync`,
-  `--background-pull`, `--create-in-apple`, and `--update-in-apple`,
-  restoring sub-second sync.  The `--fetch-urls-script`,
-  `--set-url-template`, `--fetch-urls`, `--set-url-in-apple`, and
-  `--merge-urls` defuns are kept in the file (dead code) so a future
-  helper-binary path can re-enable them.  URL field sync is now a
-  known limitation — see "Planned → URL field via signed helper".
-  ✓ Merged to `main` (v1.11.1).
-
-- **URL field via EventKit** (v1.11) — v1.10 read/wrote the URL field
-  through Apple's scripting dictionary (`r.URL` in JXA), which actually
-  fails on modern macOS: the dictionary advertises the property but its
-  value is not marshallable to JS (and AppleScript hits "can't be read"
-  too).  The URL is reachable only via the **EventKit** framework.
-
-  This release switches both directions of URL sync to EventKit while
-  keeping every other field on the existing fast JXA path:
-  - `--fetch-urls-script` uses `ObjC.import('EventKit')`,
-    `[EKEventStore fetchRemindersMatchingPredicate:completion:]` and
-    returns a JSON id → URL map.  Merged into the main fetch result
-    inside `org-apple-reminders-sync` and the background pull.
-  - `--set-url-template` uses `[EKEventStore calendarItemWithIdentifier:]`
-    and `[EKEventStore saveReminder:commit:error:]` to write URLs back.
-    Called from `--create-in-apple` after a new reminder is created and
-    from `--update-in-apple` alongside every JXA field update.
-
-  EventKit access needs a separate **"Full Access to Reminders"** macOS
-  permission, distinct from the Automation permission JXA uses; the
-  first sync after upgrading pops a one-time dialog.  Granting persists
-  for the calling process identity.  The script polls for the async
-  permission/fetch via `NSRunLoop` with a ~30 s timeout, so a denied
-  permission or a stuck system fails gracefully instead of hanging.
-
-  Replaces the v1.10/v1.10.1 JXA-based URL handling, which was a silent
-  no-op on this user's macOS.  ✓ Merged to `main` (v1.11).
-
-- **URL backfill on sync** (v1.10.1) — `org-apple-reminders-sync`
-  (`C-c r R`) now backfills `REMINDER_URL` for already-linked headings
-  whose Apple reminder has a URL but whose org heading does not.  The
-  backfill runs outside the modDate-gated conflict-resolution so URLs
-  added in Apple *before* v1.10 was loaded are picked up on the next
-  sync, instead of waiting forever for Apple to bump its modDate.  The
-  backfill only sets, never overrides — once the property has a value,
-  normal conflict resolution takes over.  ✓ Merged to `main` (v1.10.1).
-
-- **URL field sync** (v1.10) — Apple Reminders' dedicated **URL field** (the
-  globe/link icon attachment, distinct from URLs you type into the notes
-  body) now round-trips with org. On pull, the URL is stored as a new
-  `REMINDER_URL` property next to `REMINDER_ID` / `REMINDER_LIST` in the
-  heading's properties drawer. On push, the property's value is written
-  back to Apple. Old Reminders versions that don't expose the URL field
-  via JXA degrade silently (the property simply isn't created). Conflict
-  resolution compares URLs the same way it compares title/due/notes. ✓
-  Merged to `main` (v1.10).
+  Lesson learned: unproven feature work should live on
+  `feature/<name>` branches and never touch `main` / `stable` until
+  observation, not just compilation, confirms it works.  See
+  `RELEASE-FLOW.md` § feature branches.
+  ✓ Merged to `main` (v1.13).
 
 - **Delete-reminder: mark DONE across all known files** (v1.9.3) — `C-c r D`
   no longer deletes the org heading.  It deletes the Apple reminder, marks
