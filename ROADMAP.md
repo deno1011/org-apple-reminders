@@ -9,6 +9,23 @@ _(nothing in active development)_
 
 ## Done
 
+- **URL field sync disabled** (v1.11.1) — empirical testing on macOS 14+
+  showed v1.11's EventKit approach can't work through `/usr/bin/osascript`:
+  the binary's Info.plist declares neither
+  `NSRemindersFullAccessUsageDescription` nor any Reminders entitlement,
+  so `requestFullAccessToRemindersWithCompletion:` silently never fires
+  its callback (adding ~30 s per sync waiting for the runloop timeout),
+  and the legacy `requestAccessToEntityType:` grants WRITE-ONLY access
+  on macOS 14+ — `r.URL` reads as `null` for every reminder.  This
+  release stops calling EventKit in `org-apple-reminders-sync`,
+  `--background-pull`, `--create-in-apple`, and `--update-in-apple`,
+  restoring sub-second sync.  The `--fetch-urls-script`,
+  `--set-url-template`, `--fetch-urls`, `--set-url-in-apple`, and
+  `--merge-urls` defuns are kept in the file (dead code) so a future
+  helper-binary path can re-enable them.  URL field sync is now a
+  known limitation — see "Planned → URL field via signed helper".
+  ✓ Merged to `main` (v1.11.1).
+
 - **URL field via EventKit** (v1.11) — v1.10 read/wrote the URL field
   through Apple's scripting dictionary (`r.URL` in JXA), which actually
   fails on modern macOS: the dictionary advertises the property but its
@@ -155,6 +172,20 @@ _(nothing in active development)_
 
 - **Delete list** — delete an entire Apple Reminders list and its
   corresponding `* ListName` section from the org file.
+
+### URL field via signed helper
+
+- macOS 14+ requires `NSRemindersFullAccessUsageDescription` in the
+  calling binary's Info.plist to read the URL field of a reminder via
+  EventKit.  `/usr/bin/osascript` declares neither this key nor any
+  Reminders entitlement, so the URL field is unreachable from any JXA /
+  AppleScript invocation on modern macOS.  Path forward: ship a tiny
+  Swift helper (~50 lines, two subcommands `fetch-urls` and
+  `set-url ID URL`) with its own bundle declaring both
+  `NSRemindersFullAccessUsageDescription` and
+  `NSRemindersUsageDescription`.  Build it on first use via the
+  Command Line Tools' `swiftc`, falling back gracefully if the user
+  doesn't have them installed.
 
 ### Sync improvements
 

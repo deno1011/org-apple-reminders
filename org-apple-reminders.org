@@ -81,7 +81,7 @@ generated file.
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-7
-;; Version: 1.11
+;; Version: 1.11.1
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -885,8 +885,9 @@ JSON.stringify(newId);"
          (new-id (condition-case nil
                      (json-parse-string (org-apple-reminders--jxa-run script))
                    (error nil))))
-    (when (and new-id (stringp url) (not (string-empty-p url)))
-      (org-apple-reminders--set-url-in-apple new-id url))
+    ;; URL push via EventKit is disabled in v1.11.1 — see
+    ;; `org-apple-reminders-sync' for the reasoning.
+    (ignore url)
     new-id))
 
 (defun org-apple-reminders--update-in-apple (list-name id vals &optional callback)
@@ -894,8 +895,7 @@ JSON.stringify(newId);"
 Without CALLBACK: synchronous; returns Apple's modificationDate after the
 push, or nil.
 With CALLBACK: async; CALLBACK receives the modificationDate string.
-URL is set via EventKit alongside the JXA field update — the URL field
-isn't reachable via Apple's scripting dictionary."
+The URL field is not pushed — see `org-apple-reminders-sync' for why."
   (let* ((title   (alist-get 'title    vals ""))
          (notes   (alist-get 'notes    vals ""))
          (prio    (alist-get 'priority vals 0))
@@ -914,11 +914,9 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
                (format "r.dueDate=new Date(%s);"
                        (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00"))))
              "r.dueDate=null;"))))
-    ;; URL via EventKit (the only path that actually works on macOS where
-    ;; Apple's scripting dictionary doesn't expose the field).  Runs
-    ;; synchronously; failure is silent.  When `url' is nil/empty the field
-    ;; is cleared on the Apple side.
-    (org-apple-reminders--set-url-in-apple id url)
+    ;; URL push via EventKit is disabled in v1.11.1 — see
+    ;; `org-apple-reminders-sync' for the reasoning.
+    (ignore url)
     (if callback
         (org-apple-reminders--jxa-async
          script
@@ -1747,12 +1745,17 @@ New Apple items not linked in any known file → pulled into sync-file only."
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
          (n-pruned 0))
-    ;; Merge URL field from EventKit — Apple Events scripting doesn't
-    ;; expose it, so the JXA fetch above only sets `url' to nil.  EventKit
-    ;; fills it in here, before any of the Phase 1 / Phase 2 logic reads
-    ;; from `data' or `apple-by-id'.  Items in `apple-by-id' share the
-    ;; same alist objects as `data', so this single call updates both.
-    (org-apple-reminders--merge-urls data)
+    ;; URL field sync is currently DISABLED.  v1.11 tried to read URLs via
+    ;; EventKit (since the Apple Events scripting dictionary advertises the
+    ;; field but `r.URL' returns "Types cannot be converted" on macOS 14+).
+    ;; That path is blocked too: `/usr/bin/osascript' does not declare
+    ;; `NSRemindersFullAccessUsageDescription' in its Info.plist, so
+    ;; `requestFullAccessToRemindersWithCompletion:' silently swallows the
+    ;; callback (added ~30s per sync waiting for it to time out), and the
+    ;; legacy `requestAccessToEntityType:' grants WRITE-ONLY access on
+    ;; macOS 14+ -- `r.URL' reads as `null' for every reminder.  Reading
+    ;; the URL field would require shipping a code-signed Swift helper
+    ;; with the proper Info.plist; deferred to v1.12+.
     (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
@@ -2012,8 +2015,7 @@ and silent, so it can run every few minutes without disturbing the user.
                                       (puthash (alist-get 'id item) item ht)))
                                   ht))
                   (id-index     (org-apple-reminders--build-id-index)))
-             ;; Merge URL field from EventKit (see `org-apple-reminders-sync').
-             (org-apple-reminders--merge-urls data)
+             ;; URL field sync is disabled (see `org-apple-reminders-sync').
              (setq org-apple-reminders--cache data)
              (org-apple-reminders--write-agenda-file data)
              (let ((org-apple-reminders--syncing t))
