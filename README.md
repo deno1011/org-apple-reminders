@@ -6,7 +6,7 @@ Bidirectional sync between Emacs [org-mode](https://orgmode.org) and macOS Apple
 
 - Full bidirectional sync: org ↔ Apple Reminders
 - Conflict resolution via dual timestamps (`REMINDER_APPLE_MOD` / `REMINDER_ORG_MOD`)
-- Fields synced: title, due date + time, priority (A/B/C ↔ 1/5/9), flagged/starred, notes
+- Fields synced: title, due date + time, priority (A/B/C ↔ 1/5/9), flagged/starred, notes; URL field opt-in via a tiny signed Swift helper (see [URL field](#url-field-optional))
 - Selective list sync — choose which Apple lists appear in org
 - Push any org heading — or a whole region of headings — to Apple; move reminders between lists
 - Progress cookies `[N/M]` on list headings
@@ -18,6 +18,42 @@ Bidirectional sync between Emacs [org-mode](https://orgmode.org) and macOS Apple
 - macOS 10.14 (Mojave) or later — JXA support required
 - Emacs 27.1+
 - org-mode 9.3+
+- **Optional:** Xcode Command Line Tools (`xcode-select --install`) — only if you want URL-field sync; see [URL field](#url-field-optional)
+
+## URL field (optional)
+
+Apple's scripting dictionary does not expose the URL field of a reminder
+(the dedicated link attachment shown as a globe in the Reminders app).
+The field is only reachable via EventKit, and on macOS 14+ EventKit
+requires the calling binary to declare `NSRemindersFullAccessUsageDescription`
+in its Info.plist **and** be code-signed. `/usr/bin/osascript` satisfies
+neither requirement, so URL sync is opt-in via a tiny Swift helper that
+this package ships as embedded source and compiles on demand.
+
+Install it once:
+
+```
+M-x org-apple-reminders-install-helper
+```
+
+This:
+
+1. Checks for `swiftc`; if missing, offers to run `xcode-select --install`.
+2. Writes the embedded Swift source and `Info.plist` to a temp dir.
+3. Calls `swiftc -O -Xlinker -sectcreate __TEXT __info_plist <plist> …` so
+   the `Info.plist` is linked into the binary's `__TEXT,__info_plist`
+   section.
+4. Ad-hoc-signs the binary with `codesign -s - --force` so macOS TCC
+   honors the bound Info.plist.
+5. Caches the binary under `user-emacs-directory`.
+
+The next sync (`C-c r R`) pops a one-time macOS dialog asking for
+**"Full Access to Reminders"**. Click *Allow*. From then on, URLs
+round-trip into the `REMINDER_URL` property and back to Apple. Sub-second
+sync performance is preserved.
+
+If you skip this step, URL sync silently no-ops and the package behaves
+as if the URL field didn't exist — no errors, no lag, just no URL data.
 
 ## Installation
 

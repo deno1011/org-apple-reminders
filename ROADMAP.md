@@ -9,6 +9,40 @@ _(nothing in active development)_
 
 ## Done
 
+- **URL field via signed Swift helper** (v1.12) — finishes what v1.10 / v1.11
+  / v1.11.1 couldn't through `osascript` alone: a tiny (~80 line) Swift
+  helper is shipped as embedded source inside `org-apple-reminders.el`
+  itself, and on first use the new interactive command
+
+      M-x org-apple-reminders-install-helper
+
+  writes the source + Info.plist to a temp dir, calls `swiftc` with
+  `-Xlinker -sectcreate __TEXT __info_plist <plist>` so the Info.plist
+  is linked into the binary's `__TEXT,__info_plist` section, ad-hoc-signs
+  the binary so macOS TCC honors the bound Info.plist, and caches the
+  result under `user-emacs-directory`.  The bound Info.plist carries
+  both `NSRemindersUsageDescription` (legacy macOS) and
+  `NSRemindersFullAccessUsageDescription` (macOS 14+), the latter being
+  what makes `EKEventStore.requestFullAccessToReminders` actually fire
+  its completion callback and grant full read access.
+
+  Wire-in:
+  - `--fetch-urls` shells out to `<binary> fetch-urls` → JSON map.
+  - `--set-url-in-apple` shells out to `<binary> set-url ID URL`.
+  - `--merge-urls` injects the map into `org-apple-reminders-sync` and
+    `--background-pull` results.
+  - `--create-in-apple` / `--update-in-apple` push URLs after the JXA
+    field update.
+  - Every step no-ops gracefully when the binary is absent, so URL sync
+    is opt-in: skip `install-helper` and the package behaves exactly
+    like v1.9 (no URL sync, no lag).
+
+  Requires Xcode Command Line Tools.  `install-helper` offers to run
+  `xcode-select --install` if `swiftc` is missing.  Pure-Lisp from a
+  MELPA perspective: the Swift source and Info.plist live as string
+  defconsts in the `.el` file, so no recipe changes are needed.
+  ✓ Merged to `main` (v1.12).
+
 - **URL field sync disabled** (v1.11.1) — empirical testing on macOS 14+
   showed v1.11's EventKit approach can't work through `/usr/bin/osascript`:
   the binary's Info.plist declares neither
@@ -172,20 +206,6 @@ _(nothing in active development)_
 
 - **Delete list** — delete an entire Apple Reminders list and its
   corresponding `* ListName` section from the org file.
-
-### URL field via signed helper
-
-- macOS 14+ requires `NSRemindersFullAccessUsageDescription` in the
-  calling binary's Info.plist to read the URL field of a reminder via
-  EventKit.  `/usr/bin/osascript` declares neither this key nor any
-  Reminders entitlement, so the URL field is unreachable from any JXA /
-  AppleScript invocation on modern macOS.  Path forward: ship a tiny
-  Swift helper (~50 lines, two subcommands `fetch-urls` and
-  `set-url ID URL`) with its own bundle declaring both
-  `NSRemindersFullAccessUsageDescription` and
-  `NSRemindersUsageDescription`.  Build it on first use via the
-  Command Line Tools' `swiftc`, falling back gracefully if the user
-  doesn't have them installed.
 
 ### Sync improvements
 

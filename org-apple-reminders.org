@@ -81,7 +81,7 @@ generated file.
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-7
-;; Version: 1.11.1
+;; Version: 1.12
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -111,7 +111,7 @@ generated file.
 ;;   - Conflict resolution via dual timestamps
 ;;     (REMINDER_APPLE_MOD vs REMINDER_ORG_MOD)
 ;;   - Fields synced: title, due date + time, priority (A/B/C <-> 1/5/9),
-;;     flagged/starred, notes, URL (stored as REMINDER_URL property)
+;;     flagged/starred, notes; the URL field is opt-in (see Helper below)
 ;;   - Selective list sync via `org-apple-reminders-included-lists'
 ;;   - Push any org heading, or a whole region of headings, to Apple;
 ;;     move reminders between lists without duplicating them
@@ -133,6 +133,19 @@ generated file.
 ;;
 ;; Then press C-c r R to run a full sync.
 ;; See the README for full installation instructions and key bindings.
+;;
+;; URL field (optional):
+;;
+;;   Apple's scripting dictionary doesn't expose the URL field, so URL sync
+;;   is opt-in via a tiny signed Swift helper.  Run, once:
+;;
+;;     M-x org-apple-reminders-install-helper
+;;
+;;   This compiles a ~50-line Swift helper using `swiftc' (Xcode Command
+;;   Line Tools, prompted if missing), ad-hoc-signs it, and caches it under
+;;   `user-emacs-directory'.  The next sync pops a one-time macOS dialog
+;;   asking for \"Full Access to Reminders\".  URL sync no-ops gracefully
+;;   if you skip this step.
 
 ;;; Code:
 
@@ -708,140 +721,266 @@ JSON.stringify(out);"
   "JXA script returning all Reminders as JSON.
 Uses batch property fetch for speed.")
 
-;; -- URL field via EventKit -------------------------------------------------
+;; -- URL field via signed Swift helper --------------------------------------
 ;;
 ;; Apple's scripting dictionary doesn't expose the URL field on a reminder
-;; (the dedicated link attachment shown as a globe in the Reminders app).
-;; Both JXA and AppleScript hit "Types cannot be converted" / "can't be read"
-;; on `r.URL'.  The field IS reachable through the EventKit framework, so we
-;; fall back to ObjC.import('EventKit') for read AND write of URL only;
-;; everything else still goes through the fast JXA path above.
+;; (the dedicated link attachment shown as a globe in the Reminders app), and
+;; on macOS 14+ EventKit's `requestFullAccessToReminders' requires the calling
+;; binary to declare `NSRemindersFullAccessUsageDescription' in its Info.plist
+;; and be code-signed.  `/usr/bin/osascript' declares neither, so the only
+;; working path is a small Swift helper that we compile once and ad-hoc-sign.
 ;;
-;; First use will pop a one-time macOS permission dialog asking for "Full
-;; Access to Reminders" — separate from the Automation permission that the
-;; JXA path uses.  Once granted, persists for the calling process identity.
+;; The Swift source and Info.plist are embedded as string defconsts below; on
+;; first use the user runs M-x `org-apple-reminders-install-helper', which
+;; writes them to a temp dir, invokes `swiftc' (Xcode Command Line Tools), and
+;; caches the resulting signed binary under `user-emacs-directory'.  The first
+;; sync after that triggers macOS's one-time "Full Access to Reminders" TCC
+;; dialog; once granted it persists for the binary's signature identity.
+;;
+;; If the binary is absent, URL sync silently no-ops — `--fetch-urls' returns
+;; an empty hash table and `--set-url-in-apple' returns nil.  Sync stays fast
+;; and no JXA EventKit timeouts occur.
 
-(defconst org-apple-reminders--fetch-urls-script
-  "ObjC.import('EventKit');
-var store=$.EKEventStore.alloc.init;
-var done=false;
-var result={};
-var doFetch=function(){
-  var p=store.predicateForRemindersInCalendars(null);
-  store.fetchRemindersMatchingPredicateCompletion(p,function(rs){
-    if(!rs){done=true;return;}
-    var n=rs.count;
-    for(var i=0;i<n;i++){
-      var r=rs.objectAtIndex(i);
-      try{
-        var u=r.URL;
-        if(u){
-          var s=u.absoluteString;
-          if(s){
-            var id=r.calendarItemExternalIdentifier;
-            if(id){
-              var idJS=String(id),sJS=String(s);
-              if(idJS&&sJS&&sJS.length>0){result[idJS]=sJS;}
-            }
-          }
-        }
-      }catch(e){}
+(defconst org-apple-reminders--helper-swift-source
+  "// org-apple-reminders-helper — reads/writes the URL field of Apple
+// Reminders via EventKit.  Compiled and ad-hoc-signed on first use.
+import Foundation
+import EventKit
+
+let store = EKEventStore()
+let group = DispatchGroup()
+var granted = false
+var grantError: Error?
+
+group.enter()
+if #available(macOS 14.0, *) {
+    store.requestFullAccessToReminders { ok, err in
+        granted = ok; grantError = err; group.leave()
     }
-    done=true;
-  });
-};
-try{
-  store.requestFullAccessToRemindersWithCompletion(function(g,e){if(g)doFetch();else done=true;});
-}catch(e){
-  try{
-    store.requestAccessToEntityTypeCompletion($.EKEntityTypeReminder,function(g,e){if(g)doFetch();else done=true;});
-  }catch(e2){done=true;}
+} else {
+    store.requestAccess(to: .reminder) { ok, err in
+        granted = ok; grantError = err; group.leave()
+    }
 }
-var iter=0;
-while(!done&&iter<300){
-  $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
-  iter++;
-}
-JSON.stringify(result);"
-  "EventKit-based JXA script.
-Returns a JSON object mapping reminder external identifier to URL string.
-Used because Apple's scripting dictionary doesn't expose the URL field —
-only EventKit does.  Spins a runloop for up to ~30s while EventKit's async
-fetch completes.")
+group.wait()
 
-(defconst org-apple-reminders--set-url-template
-  "ObjC.import('EventKit');
-var store=$.EKEventStore.alloc.init;
-var done=false;
-var success=false;
-var doSet=function(){
-  var r=store.calendarItemWithIdentifier(%s);
-  if(!r){done=true;return;}
-  try{
-    %s
-    var err=Ref();
-    success=store.saveReminderCommitError(r,true,err);
-  }catch(e){}
-  done=true;
-};
-try{
-  store.requestFullAccessToRemindersWithCompletion(function(g,e){if(g)doSet();else done=true;});
-}catch(e){
-  try{
-    store.requestAccessToEntityTypeCompletion($.EKEntityTypeReminder,function(g,e){if(g)doSet();else done=true;});
-  }catch(e2){done=true;}
+if !granted {
+    FileHandle.standardError.write(
+        \"ERROR: Reminders access not granted: \\(grantError?.localizedDescription ?? \"(no error)\")\\n\"
+            .data(using: .utf8)!)
+    exit(2)
 }
-var iter=0;
-while(!done&&iter<300){
-  $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
-  iter++;
+
+let args = CommandLine.arguments
+guard args.count >= 2 else {
+    FileHandle.standardError.write(
+        \"Usage: org-apple-reminders-helper fetch-urls | set-url ID URL\\n\".data(using: .utf8)!)
+    exit(64)
 }
-JSON.stringify(success);"
-  "EventKit-based JXA template for setting URL on a single reminder.
-Two `%s' placeholders: JSON-encoded reminder ID, then the assignment
-statement (e.g. `r.URL=$.NSURL.URLWithString(\"https://…\");' or
-`r.URL=$();').  Saves via `[EKEventStore saveReminder:commit:error:]'.")
+
+switch args[1] {
+
+case \"fetch-urls\":
+    let cals = store.calendars(for: .reminder)
+    let predicate = store.predicateForReminders(in: cals)
+    var result: [String: String] = [:]
+    let fetchGroup = DispatchGroup()
+    fetchGroup.enter()
+    store.fetchReminders(matching: predicate) { reminders in
+        if let rs = reminders {
+            for r in rs {
+                if let url = r.url?.absoluteString {
+                    result[r.calendarItemExternalIdentifier] = url
+                }
+            }
+        }
+        fetchGroup.leave()
+    }
+    fetchGroup.wait()
+    let data = try! JSONSerialization.data(withJSONObject: result, options: [])
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(\"\\n\".data(using: .utf8)!)
+
+case \"set-url\":
+    guard args.count == 4 else {
+        FileHandle.standardError.write(
+            \"Usage: org-apple-reminders-helper set-url ID URL\\n\".data(using: .utf8)!)
+        exit(64)
+    }
+    let id = args[2]
+    let urlStr = args[3]
+    guard let item = store.calendarItem(withIdentifier: id) as? EKReminder else {
+        FileHandle.standardError.write(\"ERROR: reminder \\(id) not found\\n\".data(using: .utf8)!)
+        exit(3)
+    }
+    if urlStr.isEmpty {
+        item.url = nil
+    } else {
+        item.url = URL(string: urlStr)
+    }
+    do {
+        try store.save(item, commit: true)
+        print(\"OK\")
+    } catch {
+        FileHandle.standardError.write(\"ERROR: \\(error.localizedDescription)\\n\".data(using: .utf8)!)
+        exit(4)
+    }
+
+default:
+    FileHandle.standardError.write(\"Unknown subcommand: \\(args[1])\\n\".data(using: .utf8)!)
+    exit(64)
+}
+"
+  "Swift source for the EventKit helper.
+Written to a temp file by `org-apple-reminders--helper-build' and compiled
+via `swiftc'.  The resulting binary embeds `Info.plist' in its
+`__TEXT,__info_plist' section so macOS TCC honors
+`NSRemindersFullAccessUsageDescription' on macOS 14+.")
+
+(defconst org-apple-reminders--helper-info-plist
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.deno1011.org-apple-reminders-helper</string>
+    <key>CFBundleName</key>
+    <string>org-apple-reminders-helper</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Read and write Apple Reminders URL fields from Emacs (org-apple-reminders).</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Read and write Apple Reminders URL fields from Emacs (org-apple-reminders).</string>
+</dict>
+</plist>
+"
+  "Info.plist source linked into the helper binary's `__TEXT,__info_plist'
+section by `swiftc'.  Provides the macOS 14+ Reminders usage description
+keys needed for TCC to grant full access.")
+
+(defun org-apple-reminders--helper-binary-path ()
+  "Return the absolute path where the compiled helper binary is cached."
+  (expand-file-name "org-apple-reminders/org-apple-reminders-helper"
+                    user-emacs-directory))
+
+(defun org-apple-reminders--helper-available-p ()
+  "Return non-nil iff the helper binary exists and is executable."
+  (let ((p (org-apple-reminders--helper-binary-path)))
+    (and (file-exists-p p) (file-executable-p p))))
+
+(defun org-apple-reminders--helper-build ()
+  "Compile and ad-hoc-sign the helper binary.
+Writes the embedded Swift source and Info.plist to a temp dir, invokes
+`swiftc' with `-Xlinker -sectcreate __TEXT __info_plist Info.plist' so the
+Info.plist is bound into the binary, then `codesign -s - --force' to
+ad-hoc-sign so macOS TCC honors the bound Info.plist.  Returns the binary
+path on success, signals `user-error' on failure."
+  (unless (executable-find "swiftc")
+    (user-error
+     "swiftc not found — install Xcode Command Line Tools (`xcode-select --install')"))
+  (let* ((out      (org-apple-reminders--helper-binary-path))
+         (out-dir  (file-name-directory out))
+         (tmpdir   (make-temp-file "org-apple-reminders-helper-" t))
+         (src      (expand-file-name "helper.swift" tmpdir))
+         (plist    (expand-file-name "Info.plist"   tmpdir))
+         (buf      (get-buffer-create " *org-apple-reminders-helper-build*")))
+    (with-current-buffer buf (erase-buffer))
+    (make-directory out-dir t)
+    (with-temp-file src   (insert org-apple-reminders--helper-swift-source))
+    (with-temp-file plist (insert org-apple-reminders--helper-info-plist))
+    (unwind-protect
+        (let ((rc-build
+               (call-process "swiftc" nil buf nil
+                             "-O"
+                             "-Xlinker" "-sectcreate"
+                             "-Xlinker" "__TEXT"
+                             "-Xlinker" "__info_plist"
+                             "-Xlinker" plist
+                             "-o" out
+                             src)))
+          (unless (eq rc-build 0)
+            (user-error "swiftc failed (see buffer %s)" (buffer-name buf)))
+          (let ((rc-sign
+                 (call-process "codesign" nil buf nil
+                               "-s" "-" "--force" out)))
+            (unless (eq rc-sign 0)
+              (user-error "codesign failed (see buffer %s)" (buffer-name buf))))
+          (unless (file-executable-p out)
+            (user-error "helper binary not executable after build"))
+          out)
+      (delete-directory tmpdir t))))
+
+;;;###autoload
+(defun org-apple-reminders-install-helper ()
+  "Build and install the URL-field helper binary.
+The URL field of an Apple Reminder is only reachable via EventKit, which
+on macOS 14+ requires the calling binary to declare
+`NSRemindersFullAccessUsageDescription' in its Info.plist AND be
+code-signed.  This command writes the embedded Swift source to a temp
+dir, compiles it with `swiftc', ad-hoc-signs it, and caches the binary
+under `user-emacs-directory'.  Requires Xcode Command Line Tools.
+After install, the first sync will trigger a one-time macOS TCC dialog
+asking for \"Full Access to Reminders\"; click Allow."
+  (interactive)
+  (cond
+   ((not (eq system-type 'darwin))
+    (user-error "org-apple-reminders helper is macOS-only"))
+   ((not (executable-find "swiftc"))
+    (when (yes-or-no-p
+           "swiftc not found.  Install Xcode Command Line Tools now? ")
+      (call-process "xcode-select" nil nil nil "--install"))
+    (user-error
+     "Re-run M-x org-apple-reminders-install-helper after Command Line Tools install completes"))
+   (t
+    (message "Building org-apple-reminders helper...")
+    (let ((path (org-apple-reminders--helper-build)))
+      (message "Helper installed at %s — next sync will prompt for Reminders access"
+               path)))))
 
 (defun org-apple-reminders--fetch-urls ()
-  "Return hash table mapping Apple reminder ID to URL string (via EventKit).
-Empty table when EventKit is unavailable, permission was denied, or no
-reminder carries a URL.  Permission may prompt the user on first use;
-once granted it persists for the calling process identity."
-  (condition-case nil
-      (json-parse-string
-       (org-apple-reminders--jxa-run org-apple-reminders--fetch-urls-script)
-       :object-type 'hash-table)
-    (error (make-hash-table :test 'equal))))
+  "Return hash table mapping Apple reminder ID to URL string.
+Calls the cached helper binary's `fetch-urls' subcommand.  Returns an
+empty hash table when the helper isn't installed, permission was denied,
+or no reminder carries a URL.  Run M-x `org-apple-reminders-install-helper'
+once to install the helper."
+  (if (not (org-apple-reminders--helper-available-p))
+      (make-hash-table :test 'equal)
+    (condition-case nil
+        (with-temp-buffer
+          (let ((rc (call-process (org-apple-reminders--helper-binary-path)
+                                  nil t nil "fetch-urls")))
+            (if (eq rc 0)
+                (json-parse-string (buffer-string) :object-type 'hash-table)
+              (make-hash-table :test 'equal))))
+      (error (make-hash-table :test 'equal)))))
 
 (defun org-apple-reminders--set-url-in-apple (id url)
-  "Set the URL field on Apple reminder ID via EventKit.
-A nil or empty URL clears the field.  Return t on success, nil on failure
-or denied permission.  Used by `org-apple-reminders--create-in-apple' and
-`org-apple-reminders--update-in-apple' because Apple's scripting dictionary
-doesn't expose the URL field on modern macOS."
-  (let* ((set-form
-          (if (and (stringp url) (not (string-empty-p url)))
-              (format "r.URL=$.NSURL.URLWithString(%s);" (json-encode url))
-            "r.URL=$();"))
-         (script (format org-apple-reminders--set-url-template
-                         (json-encode id) set-form)))
+  "Set the URL field on Apple reminder ID via the helper binary.
+A nil or empty URL clears the field.  Return t on success, nil on
+failure or when the helper isn't installed."
+  (when (org-apple-reminders--helper-available-p)
     (condition-case nil
-        (eq t (json-parse-string (org-apple-reminders--jxa-run script)))
+        (eq 0 (call-process (org-apple-reminders--helper-binary-path)
+                            nil nil nil
+                            "set-url" id (or url "")))
       (error nil))))
 
 (defun org-apple-reminders--merge-urls (data)
-  "Destructively merge EventKit URL data into DATA, the JXA fetch result.
-For each item alist DATA contains, set (url . VAL) when EventKit reports
+  "Destructively merge helper-fetched URL data into DATA, the JXA fetch result.
+For each item alist DATA contains, set (url . VAL) when the helper reports
 a URL for that REMINDER_ID.  Items without a URL are left untouched.
-Returns DATA so callers can use it inside a `let*' binding."
-  (let ((url-map (org-apple-reminders--fetch-urls)))
-    (when (and url-map (> (hash-table-count url-map) 0))
-      (dolist (entry data)
-        (dolist (item (alist-get 'items entry))
-          (let* ((id (alist-get 'id item))
-                 (u  (gethash id url-map)))
-            (when (stringp u)
-              (setf (alist-get 'url item) u)))))))
+Returns DATA so callers can use it inside a `let*' binding.  No-op when
+the helper isn't installed."
+  (when (org-apple-reminders--helper-available-p)
+    (let ((url-map (org-apple-reminders--fetch-urls)))
+      (when (and url-map (> (hash-table-count url-map) 0))
+        (dolist (entry data)
+          (dolist (item (alist-get 'items entry))
+            (let* ((id (alist-get 'id item))
+                   (u  (gethash id url-map)))
+              (when (stringp u)
+                (setf (alist-get 'url item) u))))))))
   data)
 
 (defun org-apple-reminders--complete-in-apple (list-name id)
@@ -885,9 +1024,10 @@ JSON.stringify(newId);"
          (new-id (condition-case nil
                      (json-parse-string (org-apple-reminders--jxa-run script))
                    (error nil))))
-    ;; URL push via EventKit is disabled in v1.11.1 — see
-    ;; `org-apple-reminders-sync' for the reasoning.
-    (ignore url)
+    ;; Push the URL field via the helper binary.  No-op when the helper
+    ;; isn't installed.  Run M-x `org-apple-reminders-install-helper'.
+    (when (and new-id (stringp url) (not (string-empty-p url)))
+      (org-apple-reminders--set-url-in-apple new-id url))
     new-id))
 
 (defun org-apple-reminders--update-in-apple (list-name id vals &optional callback)
@@ -895,7 +1035,7 @@ JSON.stringify(newId);"
 Without CALLBACK: synchronous; returns Apple's modificationDate after the
 push, or nil.
 With CALLBACK: async; CALLBACK receives the modificationDate string.
-The URL field is not pushed — see `org-apple-reminders-sync' for why."
+The URL field is pushed via the signed Swift helper (no-op without it)."
   (let* ((title   (alist-get 'title    vals ""))
          (notes   (alist-get 'notes    vals ""))
          (prio    (alist-get 'priority vals 0))
@@ -914,9 +1054,9 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
                (format "r.dueDate=new Date(%s);"
                        (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00"))))
              "r.dueDate=null;"))))
-    ;; URL push via EventKit is disabled in v1.11.1 — see
-    ;; `org-apple-reminders-sync' for the reasoning.
-    (ignore url)
+    ;; Push the URL field via the helper binary.  No-op when the helper
+    ;; isn't installed.  When `url' is nil/empty, the field is cleared.
+    (org-apple-reminders--set-url-in-apple id url)
     (if callback
         (org-apple-reminders--jxa-async
          script
@@ -1745,17 +1885,11 @@ New Apple items not linked in any known file → pulled into sync-file only."
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
          (n-pruned 0))
-    ;; URL field sync is currently DISABLED.  v1.11 tried to read URLs via
-    ;; EventKit (since the Apple Events scripting dictionary advertises the
-    ;; field but `r.URL' returns "Types cannot be converted" on macOS 14+).
-    ;; That path is blocked too: `/usr/bin/osascript' does not declare
-    ;; `NSRemindersFullAccessUsageDescription' in its Info.plist, so
-    ;; `requestFullAccessToRemindersWithCompletion:' silently swallows the
-    ;; callback (added ~30s per sync waiting for it to time out), and the
-    ;; legacy `requestAccessToEntityType:' grants WRITE-ONLY access on
-    ;; macOS 14+ -- `r.URL' reads as `null' for every reminder.  Reading
-    ;; the URL field would require shipping a code-signed Swift helper
-    ;; with the proper Info.plist; deferred to v1.12+.
+    ;; Merge URL field from the signed Swift helper.  No-op when the helper
+    ;; isn't installed (sync stays fast; URLs simply don't appear in
+    ;; `REMINDER_URL' properties).  Items in `apple-by-id' share the same
+    ;; alist objects as `data', so this single call updates both.
+    (org-apple-reminders--merge-urls data)
     (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
@@ -2015,7 +2149,8 @@ and silent, so it can run every few minutes without disturbing the user.
                                       (puthash (alist-get 'id item) item ht)))
                                   ht))
                   (id-index     (org-apple-reminders--build-id-index)))
-             ;; URL field sync is disabled (see `org-apple-reminders-sync').
+             ;; URL field sync via helper (see `org-apple-reminders-sync').
+             (org-apple-reminders--merge-urls data)
              (setq org-apple-reminders--cache data)
              (org-apple-reminders--write-agenda-file data)
              (let ((org-apple-reminders--syncing t))
