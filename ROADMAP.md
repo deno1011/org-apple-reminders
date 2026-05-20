@@ -9,6 +9,12 @@ _(nothing in active development)_
 
 ## Done
 
+- **GPL boilerplate** (v1.9.2) — add the full short-form GNU GPL-3.0
+  notice above `;;; Commentary`, as MELPA's CONTRIBUTING.org requires
+  ("The license boilerplate should be applied above the `;;; Commentary`
+  of each source file").  The `SPDX-License-Identifier` line stays as
+  well.  No code changes. ✓ Merged to `main` (v1.9.2).
+
 - **MELPA hygiene** (v1.9.1) — make the package land cleanly with MELPA's
   reviewers: drop the spurious `(cl-lib "0.5")` dependency (`cl-lib` is
   built-in on Emacs ≥ 24.3); replace `with-eval-after-load` in
