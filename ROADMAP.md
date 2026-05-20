@@ -9,6 +9,16 @@ _(nothing in active development)_
 
 ## Done
 
+- **URL field sync** (v1.10) — Apple Reminders' dedicated **URL field** (the
+  globe/link icon attachment, distinct from URLs you type into the notes
+  body) now round-trips with org. On pull, the URL is stored as a new
+  `REMINDER_URL` property next to `REMINDER_ID` / `REMINDER_LIST` in the
+  heading's properties drawer. On push, the property's value is written
+  back to Apple. Old Reminders versions that don't expose the URL field
+  via JXA degrade silently (the property simply isn't created). Conflict
+  resolution compares URLs the same way it compares title/due/notes. ✓
+  Merged to `main` (v1.10).
+
 - **Delete-reminder: mark DONE across all known files** (v1.9.3) — `C-c r D`
   no longer deletes the org heading.  It deletes the Apple reminder, marks
   the linked org heading as DONE, strips the `REMINDER_*` link properties,

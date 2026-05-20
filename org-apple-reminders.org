@@ -81,7 +81,7 @@ generated file.
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-7
-;; Version: 1.9.3
+;; Version: 1.10
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -111,7 +111,7 @@ generated file.
 ;;   - Conflict resolution via dual timestamps
 ;;     (REMINDER_APPLE_MOD vs REMINDER_ORG_MOD)
 ;;   - Fields synced: title, due date + time, priority (A/B/C <-> 1/5/9),
-;;     flagged/starred, notes
+;;     flagged/starred, notes, URL (stored as REMINDER_URL property)
 ;;   - Selective list sync via `org-apple-reminders-included-lists'
 ;;   - Push any org heading, or a whole region of headings, to Apple;
 ;;     move reminders between lists without duplicating them
@@ -641,9 +641,11 @@ Strips LOGBOOK drawers and per-line leading whitespace."
                         ((eql prio-char ?C) 9)
                         (t 0)))
            (flagged (if (member "flagged" (org-get-tags nil t)) t nil))
-           (notes   (org-apple-reminders--extract-notes)))
+           (notes   (org-apple-reminders--extract-notes))
+           (url     (let ((u (org-entry-get nil "REMINDER_URL")))
+                      (and (stringp u) (not (string-empty-p u)) u))))
       `((title . ,title) (due . ,due) (priority . ,prio)
-        (flagged . ,flagged) (notes . ,notes)))))
+        (flagged . ,flagged) (notes . ,notes) (url . ,url)))))
 
 (defun org-apple-reminders--prio-label (p)
   "Return org priority prefix string for Apple priority integer P."
@@ -689,12 +691,15 @@ app.lists().forEach(function(l){
   var names=rs.name(),ids=rs.id(),bodies=rs.body(),
       dates=rs.dueDate(),prios=rs.priority(),flags=rs.flagged(),compl=rs.completed(),
       mods=rs.modificationDate();
+  var urls=null;
+  try{urls=rs.URL();}catch(e){try{urls=rs.url();}catch(e2){urls=null;}}
   var items=[];
   for(var i=0;i<names.length;i++){
-    var d=dates[i],md=mods[i];
+    var d=dates[i],md=mods[i],u=urls&&urls[i];
     items.push({id:ids[i],title:names[i],notes:bodies[i]||'',
                 due:(d&&d instanceof Date&&!isNaN(d)&&d.getFullYear()>1970)?(function(){var ds=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');var h=d.getHours(),m=d.getMinutes();return(h||m)?ds+'T'+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'):ds;}()):null,
                 priority:prios[i],flagged:flags[i],completed:!!compl[i],
+                url:(typeof u==='string'&&u.length>0)?u:null,
                 modDate:(md&&md instanceof Date&&!isNaN(md))?md.toISOString():null});
   }
   out.push({list:l.name(),items:items});
@@ -724,11 +729,13 @@ Return new ID string or nil."
          (prio    (alist-get 'priority vals 0))
          (due     (alist-get 'due      vals))
          (flagged (alist-get 'flagged  vals))
+         (url     (alist-get 'url      vals))
          (script
           (format
            "var app=Application('Reminders'),list=app.lists.byName(%s);
 var prev=list.reminders.id();
-list.reminders.push(app.Reminder({name:%s,body:%s,priority:%d,flagged:%s%s}));
+var r=app.Reminder({name:%s,body:%s,priority:%d,flagged:%s%s});
+list.reminders.push(r);%s
 var next=list.reminders.id(),newId=null;
 for(var i=0;i<next.length;i++){if(prev.indexOf(next[i])<0){newId=next[i];break;}}
 JSON.stringify(newId);"
@@ -736,7 +743,14 @@ JSON.stringify(newId);"
            (json-encode title) (json-encode notes) prio
            (if flagged "true" "false")
            (if due (format ",dueDate:new Date(%s)"
-                           (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))) ""))))
+                           (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))) "")
+           ;; URL must be set on the live reminder after push (the constructor
+           ;; doesn't accept it directly in some Reminders versions); use a
+           ;; try/catch so older systems silently no-op.
+           (if (and (stringp url) (not (string-empty-p url)))
+               (format "try{r.URL=%s;}catch(e){try{r.url=%s;}catch(e2){}}"
+                       (json-encode url) (json-encode url))
+             ""))))
     (condition-case nil
         (json-parse-string (org-apple-reminders--jxa-run script))
       (error nil))))
@@ -751,10 +765,11 @@ With CALLBACK: async; CALLBACK receives the modificationDate string."
          (prio    (alist-get 'priority vals 0))
          (due     (alist-get 'due      vals))
          (flagged (alist-get 'flagged  vals))
+         (url     (alist-get 'url      vals))
          (script
           (format
            "var r=Application('Reminders').lists.byName(%s).reminders.byId(%s);
-r.name=%s;r.body=%s;r.priority=%d;r.flagged=%s;%s
+r.name=%s;r.body=%s;r.priority=%d;r.flagged=%s;%s%s
 var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOString():null);"
            (json-encode list-name) (json-encode id)
            (json-encode title) (json-encode notes) prio
@@ -762,7 +777,14 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
            (if due
                (format "r.dueDate=new Date(%s);"
                        (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00"))))
-             "r.dueDate=null;"))))
+             "r.dueDate=null;")
+           ;; URL: set if non-empty, clear (to empty string) when nil.  Older
+           ;; Reminders versions may not expose the field; try/catch keeps the
+           ;; rest of the update working in that case.
+           (if (and (stringp url) (not (string-empty-p url)))
+               (format "try{r.URL=%s;}catch(e){try{r.url=%s;}catch(e2){}}"
+                       (json-encode url) (json-encode url))
+             "try{r.URL=\"\";}catch(e){try{r.url=\"\";}catch(e2){}}"))))
     (if callback
         (org-apple-reminders--jxa-async
          script
@@ -1375,7 +1397,9 @@ Tidies sections that earlier versions inserted flush against each other."
          (notes   (alist-get 'notes    item))
          (due     (alist-get 'due      item))
          (prio    (alist-get 'priority item))
-         (flagged (alist-get 'flagged  item)))
+         (flagged (alist-get 'flagged  item))
+         (url     (let ((u (alist-get 'url item)))
+                    (and (stringp u) (not (string-empty-p u)) u))))
     (unless (bolp) (insert "\n"))
     (insert (format "** TODO %s%s%s\n"
                     (org-apple-reminders--prio-label prio)
@@ -1383,8 +1407,12 @@ Tidies sections that earlier versions inserted flush against each other."
                     title))
     (when (and due (not (eq due :null)))
       (insert (format "   DEADLINE: %s\n" (org-apple-reminders--format-due due))))
-    (insert (format "   :PROPERTIES:\n   :REMINDER_ID:   %s\n   :REMINDER_LIST: %s\n   :END:\n"
-                    id list-name))
+    (insert "   :PROPERTIES:\n")
+    (insert (format "   :REMINDER_ID:   %s\n" id))
+    (insert (format "   :REMINDER_LIST: %s\n" list-name))
+    (when url
+      (insert (format "   :REMINDER_URL:  %s\n" url)))
+    (insert "   :END:\n")
     (when (and (stringp notes) (not (string-empty-p notes)))
       (dolist (line (split-string notes "\n"))
         (insert (format "   %s\n" line))))))
@@ -1504,7 +1532,10 @@ other linked files only push updates to already-stamped headings."
                                    (let ((d (alist-get 'due cached)))
                                      (and (stringp d) (not (string-empty-p d)) d))))
                        (not (eq (alist-get 'flagged vals)
-                                (eq (alist-get 'flagged cached) t))))))
+                                (eq (alist-get 'flagged cached) t)))
+                       (not (equal (or (alist-get 'url vals) "")
+                                   (let ((u (alist-get 'url cached)))
+                                     (or (and (stringp u) u) "")))))))
              (when needs-push
                ;; Async update — capture position for the callback to stamp REMINDER_ORG_MOD
                (let ((m (point-marker)))
@@ -1631,6 +1662,8 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                           (a-flagged (eq (alist-get 'flagged apple) t))
                                           (a-title  (or (alist-get 'title apple) ""))
                                           (a-notes  (or (alist-get 'notes apple) ""))
+                                          (a-url    (let ((u (alist-get 'url apple)))
+                                                      (and (stringp u) (not (string-empty-p u)) u)))
                                           (p-char   (nth 3 (org-heading-components)))
                                           (o-prio   (cond ((eql p-char ?A) 1)
                                                           ((eql p-char ?B) 5)
@@ -1644,15 +1677,18 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                           (o-title  (replace-regexp-in-string
                                                      "^★ " "" (org-get-heading t t t t)))
                                           (o-notes  (org-apple-reminders--extract-notes))
+                                          (o-url    (let ((u (org-entry-get nil "REMINDER_URL")))
+                                                      (and (stringp u) (not (string-empty-p u)) u)))
                                           (changed  (or (/= a-prio o-prio)
                                                         (not (equal a-due o-due))
                                                         (not (eq a-flagged o-flagged))
                                                         (not (equal a-title o-title))
-                                                        (not (equal a-notes o-notes)))))
+                                                        (not (equal a-notes o-notes))
+                                                        (not (equal a-url o-url)))))
                                      (if changed
                                          (push (list (point-marker) rlist
                                                      a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                                                     a-title o-title a-notes o-notes)
+                                                     a-title o-title a-notes o-notes a-url o-url)
                                                apple-updates)
                                        ;; Apple's modDate advanced but every tracked
                                        ;; field already matches org — record that this
@@ -1671,7 +1707,10 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                                          (let ((d (alist-get 'due apple)))
                                                            (and (stringp d) (not (string-empty-p d)) d))))
                                              (not (eq (alist-get 'flagged vals)
-                                                      (eq (alist-get 'flagged apple) t))))))
+                                                      (eq (alist-get 'flagged apple) t)))
+                                             (not (equal (or (alist-get 'url vals) "")
+                                                         (let ((u (alist-get 'url apple)))
+                                                           (or (and (stringp u) u) "")))))))
                                    (when needs-push
                                      (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
                                        (when (stringp new-mod)
@@ -1694,7 +1733,10 @@ New Apple items not linked in any known file → pulled into sync-file only."
                           (puthash new-id sync-file id-index)
                           (setq n-pushed (1+ n-pushed))))))
                   (dolist (upd (nreverse apple-updates))
-                    (cl-destructuring-bind (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title a-notes o-notes) upd
+                    (cl-destructuring-bind
+                        (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod
+                           a-title o-title a-notes o-notes a-url o-url)
+                        upd
                       (goto-char m) (push (point-marker) changed-positions)
                       (unless (equal a-title o-title)
                         (org-back-to-heading t)
@@ -1718,6 +1760,10 @@ New Apple items not linked in any known file → pulled into sync-file only."
                         (org-toggle-tag "flagged" (if a-flagged 'on 'off)))
                       (unless (equal a-notes o-notes)
                         (org-apple-reminders--set-org-notes a-notes))
+                      (unless (equal a-url o-url)
+                        (if a-url
+                            (org-set-property "REMINDER_URL" a-url)
+                          (org-entry-delete nil "REMINDER_URL")))
                       (when (stringp a-mod) (org-set-property "REMINDER_APPLE_MOD" a-mod))
                       (setq n-updated (1+ n-updated))
                       (set-marker m nil)))
