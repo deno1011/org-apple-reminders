@@ -9,6 +9,15 @@ _(nothing in active development)_
 
 ## Done
 
+- **URL backfill on sync** (v1.10.1) — `org-apple-reminders-sync`
+  (`C-c r R`) now backfills `REMINDER_URL` for already-linked headings
+  whose Apple reminder has a URL but whose org heading does not.  The
+  backfill runs outside the modDate-gated conflict-resolution so URLs
+  added in Apple *before* v1.10 was loaded are picked up on the next
+  sync, instead of waiting forever for Apple to bump its modDate.  The
+  backfill only sets, never overrides — once the property has a value,
+  normal conflict resolution takes over.  ✓ Merged to `main` (v1.10.1).
+
 - **URL field sync** (v1.10) — Apple Reminders' dedicated **URL field** (the
   globe/link icon attachment, distinct from URLs you type into the notes
   body) now round-trips with org. On pull, the URL is stored as a new

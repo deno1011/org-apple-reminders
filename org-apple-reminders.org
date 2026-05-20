@@ -81,7 +81,7 @@ generated file.
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-7
-;; Version: 1.10
+;; Version: 1.10.1
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -1636,6 +1636,22 @@ New Apple items not linked in any known file → pulled into sync-file only."
                          (push (point-marker) new-pts))
                         (id
                          (let ((apple (gethash id apple-by-id)))
+                           ;; Backfill missing REMINDER_URL from Apple.  Runs
+                           ;; outside the modDate gate because the URL field
+                           ;; is newer than the conflict-resolution code: a
+                           ;; URL added in Apple before v1.10 would otherwise
+                           ;; never trigger an apple-wins pull and the
+                           ;; property would stay missing forever.  The
+                           ;; backfill only sets, never overrides — once the
+                           ;; property exists, normal conflict resolution
+                           ;; takes over.
+                           (let ((a-url (and apple (alist-get 'url apple)))
+                                 (o-url (org-entry-get nil "REMINDER_URL")))
+                             (when (and (stringp a-url)
+                                        (not (string-empty-p a-url))
+                                        (or (null o-url)
+                                            (string-empty-p o-url)))
+                               (org-set-property "REMINDER_URL" a-url)))
                            (cond
                             ((and (member state '("DONE" "CANCELLED"))
                                   apple (not (eq (alist-get 'completed apple) t)))
