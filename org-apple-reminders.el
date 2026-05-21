@@ -481,6 +481,80 @@ JSON.stringify(out);"
   "JXA script returning all Reminders as JSON.
 Uses batch property fetch for speed.")
 
+;; -- Clearing a dueDate ------------------------------------------------------
+;;
+;; JXA's `r.dueDate = null' raises -1700 "Types cannot be converted" and
+;; AppleScript's `set due date to missing value' fails similarly.  The only
+;; reachable clear-date path is EventKit's `dueDateComponents = nil' (which
+;; in JXA is `$()' — the ObjC nil marker).  This requires only the legacy
+;; Reminders access (write-only on macOS 14+, which is what we need here),
+;; so no signed helper or Full Disk Access is required.
+
+(defconst org-apple-reminders--clear-due-template
+  "ObjC.import('EventKit');
+var store=$.EKEventStore.alloc.init;
+var done=false;
+var result={};
+var doClear=function(){
+  var r=store.calendarItemWithIdentifier(%s);
+  if(!r){done=true;return;}
+  try{
+    r.dueDateComponents=$();
+    var err=Ref();
+    if(store.saveReminderCommitError(r,true,err)){
+      var m=r.lastModifiedDate;
+      result.modDate=(m&&m.isKindOfClass($.NSDate))?ObjC.unwrap(m.descriptionWithLocale($())):null;
+      result.ok=true;
+    }
+  }catch(e){result.err=String(e);}
+  done=true;
+};
+store.requestAccessToEntityTypeCompletion($.EKEntityTypeReminder,function(g){
+  if(g){doClear();}else{done=true;}
+});
+var iter=0;
+while(!done&&iter<100){
+  $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
+  iter++;
+}
+JSON.stringify(result);"
+  "EventKit-via-JXA template for clearing a reminder's dueDate.
+One `%s' placeholder: JSON-encoded raw reminder UUID (without the
+`x-apple-reminder://' prefix — EventKit's
+`calendarItemWithIdentifier:' wants the bare UUID).  Returns a JSON
+object with `ok' (boolean) and optionally `modDate' (ISO-ish date
+string from EventKit) or `err' on failure.")
+
+(defun org-apple-reminders--strip-id-prefix (id)
+  "Strip the `x-apple-reminder://' prefix from ID if present."
+  (if (and (stringp id) (string-prefix-p "x-apple-reminder://" id))
+      (substring id (length "x-apple-reminder://"))
+    id))
+
+(defun org-apple-reminders--clear-due-in-apple (id)
+  "Clear the dueDate on Apple reminder ID via EventKit.
+Returns Apple's new modificationDate as an ISO-8601 UTC string on
+success, or nil on failure.  Falls back to fetching modDate via JXA
+since EventKit's `lastModifiedDate' formatting is locale-dependent."
+  (let* ((bare-id (org-apple-reminders--strip-id-prefix id))
+         (script  (format org-apple-reminders--clear-due-template
+                          (json-encode bare-id))))
+    (condition-case nil
+        (let ((parsed (json-parse-string
+                       (org-apple-reminders--jxa-run script)
+                       :object-type 'alist :null-object nil)))
+          (when (alist-get 'ok parsed)
+            ;; Pull a fresh ISO modDate via JXA since the EventKit one was
+            ;; locale-dependent (its description format varies by user
+            ;; locale).  JXA's modificationDate.toISOString() is stable.
+            (let* ((mod-script
+                    (format "var r=Application('Reminders').reminders.byId(%s);var m=r.modificationDate();JSON.stringify((m&&m instanceof Date)?m.toISOString():null);"
+                            (json-encode id))))
+              (condition-case nil
+                  (json-parse-string (org-apple-reminders--jxa-run mod-script))
+                (error nil)))))
+      (error nil))))
+
 (defun org-apple-reminders--complete-in-apple (list-name id)
   "Mark Apple reminder ID in LIST-NAME as completed (async)."
   (org-apple-reminders--jxa-async
@@ -523,12 +597,22 @@ JSON.stringify(newId);"
   "Push VALS alist to Apple reminder ID in LIST-NAME.
 Without CALLBACK: synchronous; returns Apple's modificationDate after the
 push, or nil.
-With CALLBACK: async; CALLBACK receives the modificationDate string."
-  (let* ((title   (alist-get 'title    vals ""))
-         (notes   (alist-get 'notes    vals ""))
-         (prio    (alist-get 'priority vals 0))
-         (due     (alist-get 'due      vals))
-         (flagged (alist-get 'flagged  vals))
+With CALLBACK: async; CALLBACK receives the modificationDate string.
+A nil/empty `due' in VALS clears Apple's dueDate via EventKit (see
+`org-apple-reminders--clear-due-in-apple') since JXA's `r.dueDate=null'
+errors with -1700."
+  (let* ((title      (alist-get 'title    vals ""))
+         (notes      (alist-get 'notes    vals ""))
+         (prio       (alist-get 'priority vals 0))
+         (due        (alist-get 'due      vals))
+         (flagged    (alist-get 'flagged  vals))
+         (clear-due  (or (null due) (and (stringp due) (string-empty-p due))))
+         ;; When clearing, omit any due-line from the JXA script entirely —
+         ;; EventKit handles the clear in a second step.
+         (due-line   (if clear-due ""
+                       (format "r.dueDate=new Date(%s);"
+                               (json-encode (concat due (if (string-match "T" due)
+                                                            ":00" "T00:00:00"))))))
          (script
           (format
            "var r=Application('Reminders').lists.byName(%s).reminders.byId(%s);
@@ -537,10 +621,16 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
            (json-encode list-name) (json-encode id)
            (json-encode title) (json-encode notes) prio
            (if flagged "true" "false")
-           (if due
-               (format "r.dueDate=new Date(%s);"
-                       (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00"))))
-             "r.dueDate=null;"))))
+           due-line))
+         ;; When clearing, do EventKit clear FIRST.  If we clear after the
+         ;; JXA write, EventKit's `calendarItemWithIdentifier:' holds a
+         ;; stale snapshot whose save races with the JXA-bumped modDate
+         ;; and ends up leaving the original dueDate in place.  Clearing
+         ;; first means JXA's subsequent write doesn't touch dueDate
+         ;; (`due-line' is empty), so the cleared state survives.
+         )
+    (when clear-due
+      (org-apple-reminders--clear-due-in-apple id))
     (if callback
         (org-apple-reminders--jxa-async
          script
@@ -1227,6 +1317,29 @@ other linked files only push updates to already-stamped headings."
 
 ;;; Full bidirectional sync
 
+(defun org-apple-reminders--autosave-known-buffers ()
+  "Save any modified buffer that visits a known reminder file.
+Saving triggers `after-save-hook' → `--on-save' → `--push-to-apple',
+which runs asynchronous JXA pushes for pending edits.  Callers should
+follow this with `--wait-for-async-jxa' before reading Apple state."
+  (dolist (file (org-apple-reminders--known-files))
+    (when (file-exists-p file)
+      (let ((buf (find-buffer-visiting file)))
+        (when (and buf (buffer-modified-p buf))
+          (with-current-buffer buf
+            (save-buffer)))))))
+
+(defun org-apple-reminders--wait-for-async-jxa (&optional max-seconds)
+  "Block until every in-flight JXA process spawned by this package finishes.
+MAX-SECONDS bounds the wait (default 10).  Processes are matched by
+the `org-ar-jxa' prefix that `--jxa-async' uses for `make-process'."
+  (let ((deadline (+ (float-time) (or max-seconds 10))))
+    (while (and (< (float-time) deadline)
+                (cl-some (lambda (proc)
+                           (string-prefix-p "org-ar-jxa" (process-name proc)))
+                         (process-list)))
+      (accept-process-output nil 0.1))))
+
 ;;;###autoload
 (defun org-apple-reminders-sync ()
   "Full bidirectional sync across all known org files ↔ Apple Reminders.
@@ -1234,15 +1347,32 @@ other linked files only push updates to already-stamped headings."
 Known files: `org-apple-reminders-sync-file', `org-apple-reminders-extra-files',
 and .org files in `org-agenda-files'.
 
-Conflict resolution per linked heading:
+Conflict resolution per linked heading (3-way):
 - No REMINDER_ID (only in sync-file) → create in Apple, stamp ID back.
-- Apple modDate unchanged → org wins: push fields if different.
-- Apple modDate newer → Apple wins: pull priority/due/flagged.
+- Apple modDate newer (apple-changed) → Apple wins: pull all fields,
+  including nils — clearing org's DEADLINE/notes when Apple's are nil.
+- REMINDER_ORG_MOD > REMINDER_APPLE_MOD (org-changed) → org wins: push
+  all fields incl. nils — clearing Apple's dueDate via EventKit when
+  org's DEADLINE is removed.
+- Neither newer (orphaned / restored) → BACKFILL ONLY: pull missing
+  org fields from Apple (DEADLINE/notes), never destructively push
+  nil from org.  Non-nil org content that differs from Apple still
+  pushes (Apple gets the user's value).
 - DONE in org, open in Apple → push completion to Apple.
 - Open in org, done/gone in Apple → mark DONE in org.
-New Apple items not linked in any known file → pulled into sync-file only."
+New Apple items not linked in any known file → pulled into sync-file only.
+
+Before fetching, modified known-file buffers are auto-saved (which
+fires `after-save-hook' → async push), and the function waits for all
+in-flight JXA processes to drain so the conflict resolution sees
+Apple's post-push state."
   (interactive)
   (message "Reminders: syncing…")
+  ;; Push any unsaved org edits first, then let async pushes drain so the
+  ;; Apple fetch below sees the post-push state and the org-changed signal
+  ;; (REMINDER_ORG_MOD > REMINDER_APPLE_MOD) is reliable.
+  (org-apple-reminders--autosave-known-buffers)
+  (org-apple-reminders--wait-for-async-jxa)
   (let* ((default-list (org-apple-reminders--default-list))
          (sync-file    (expand-file-name org-apple-reminders-sync-file))
          (raw          (org-apple-reminders--jxa-run org-apple-reminders--fetch-script))
@@ -1334,24 +1464,102 @@ New Apple items not linked in any known file → pulled into sync-file only."
                                        ;; modDate is reconciled so org edits can win later.
                                        (when (stringp a-mod)
                                          (org-set-property "REMINDER_APPLE_MOD" a-mod))))
-                                 (let* ((vals (org-apple-reminders--org-item-values))
-                                        (needs-push
-                                         (or (not (equal (or (alist-get 'title vals) "")
-                                                         (or (alist-get 'title apple) "")))
-                                             (not (equal (or (alist-get 'notes vals) "")
-                                                         (or (alist-get 'notes apple) "")))
-                                             (not (= (or (alist-get 'priority vals) 0)
-                                                     (or (alist-get 'priority apple) 0)))
-                                             (not (equal (alist-get 'due vals)
-                                                         (let ((d (alist-get 'due apple)))
-                                                           (and (stringp d) (not (string-empty-p d)) d))))
-                                             (not (eq (alist-get 'flagged vals)
-                                                      (eq (alist-get 'flagged apple) t))))))
-                                   (when needs-push
-                                     (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
-                                       (when (stringp new-mod)
-                                         (org-set-property "REMINDER_ORG_MOD" new-mod)))
-                                     (setq n-updated (1+ n-updated)))))))))))))
+                                 ;; Apple not "changed".  Split into two
+                                 ;; sub-cases:
+                                 ;;   org-changed: org pushed something since
+                                 ;;     Apple was last seen — push including
+                                 ;;     nils (clears Apple's field).
+                                 ;;   neither:    BACKFILL missing org fields
+                                 ;;     from Apple; for fields where org has
+                                 ;;     non-nil content that differs, still
+                                 ;;     push (preserves user content) but
+                                 ;;     never push nil from org.
+                                 (let* ((vals      (org-apple-reminders--org-item-values))
+                                        (apple-mod-prop (org-entry-get nil "REMINDER_APPLE_MOD"))
+                                        (org-mod-prop   (org-entry-get nil "REMINDER_ORG_MOD"))
+                                        (org-changed   (and org-mod-prop apple-mod-prop
+                                                            (string> org-mod-prop apple-mod-prop)))
+                                        (v-title (or (alist-get 'title vals) ""))
+                                        (v-notes (alist-get 'notes vals))
+                                        (v-prio  (or (alist-get 'priority vals) 0))
+                                        (v-due   (alist-get 'due vals))
+                                        (v-flag  (alist-get 'flagged vals))
+                                        (a-title (or (alist-get 'title apple) ""))
+                                        (a-notes-raw (alist-get 'notes apple))
+                                        (a-notes (and (stringp a-notes-raw) a-notes-raw))
+                                        (a-prio  (or (alist-get 'priority apple) 0))
+                                        (a-due   (let ((d (alist-get 'due apple)))
+                                                   (and (stringp d) (not (string-empty-p d)) d)))
+                                        (a-flag  (eq (alist-get 'flagged apple) t)))
+                                   (if org-changed
+                                       ;; ORG-WINS: push all diffs including
+                                       ;; nils (Bug-1 fix means clearing Apple's
+                                       ;; dueDate via EventKit now works).
+                                       (let ((needs-push
+                                              (or (not (equal v-title a-title))
+                                                  (not (equal (or v-notes "") (or a-notes "")))
+                                                  (not (= v-prio a-prio))
+                                                  (not (equal v-due a-due))
+                                                  (not (eq v-flag a-flag)))))
+                                         (when needs-push
+                                           (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
+                                             (when (stringp new-mod)
+                                               (org-set-property "REMINDER_ORG_MOD" new-mod)))
+                                           (setq n-updated (1+ n-updated))))
+                                     ;; NEITHER NEWER: backfill missing org
+                                     ;; fields, push non-nil org diffs only.
+                                     (let* ((bf-due    (and a-due (null v-due)))
+                                            (bf-notes  (and a-notes
+                                                            (not (string-empty-p a-notes))
+                                                            (string-empty-p (or v-notes ""))))
+                                            (bf-prio   (and (> a-prio 0) (= v-prio 0)))
+                                            (bf-flag   (and a-flag (not v-flag)))
+                                            (did-bf    nil))
+                                       (when bf-due
+                                         (org-add-planning-info 'deadline
+                                                                (org-apple-reminders--format-due a-due))
+                                         (setq did-bf t))
+                                       (when bf-notes
+                                         (org-apple-reminders--set-org-notes a-notes)
+                                         (setq did-bf t))
+                                       (when bf-prio
+                                         (org-priority (cond ((= a-prio 1) ?A)
+                                                             ((= a-prio 5) ?B)
+                                                             ((= a-prio 9) ?C)
+                                                             (t 'remove)))
+                                         (setq did-bf t))
+                                       (when bf-flag
+                                         (org-toggle-tag "flagged" 'on)
+                                         (setq did-bf t))
+                                       ;; Recompute vals after backfills, then
+                                       ;; check for any non-nil push needs.
+                                       (let* ((vals2 (if did-bf
+                                                         (org-apple-reminders--org-item-values)
+                                                       vals))
+                                              (v2-title (or (alist-get 'title vals2) ""))
+                                              (v2-notes (alist-get 'notes vals2))
+                                              (v2-prio  (or (alist-get 'priority vals2) 0))
+                                              (v2-due   (alist-get 'due vals2))
+                                              (v2-flag  (alist-get 'flagged vals2))
+                                              (push-due-needed (and v2-due (not (equal v2-due a-due))))
+                                              (push-notes-needed (and v2-notes
+                                                                      (not (string-empty-p v2-notes))
+                                                                      (not (equal v2-notes (or a-notes "")))))
+                                              (push-title (not (equal v2-title a-title)))
+                                              (push-prio  (and (> v2-prio 0)
+                                                               (not (= v2-prio a-prio))))
+                                              (push-flag  (not (eq v2-flag a-flag)))
+                                              (needs-push (or push-due-needed push-notes-needed
+                                                              push-title push-prio push-flag)))
+                                         (when needs-push
+                                           (let ((new-mod (org-apple-reminders--update-in-apple
+                                                           rlist id vals2)))
+                                             (when (stringp new-mod)
+                                               (org-set-property "REMINDER_ORG_MOD" new-mod))))
+                                         (when (or did-bf needs-push)
+                                           (when (stringp a-mod)
+                                             (org-set-property "REMINDER_APPLE_MOD" a-mod))
+                                           (setq n-updated (1+ n-updated))))))))))))))))
                    nil nil)
                   (dolist (m (nreverse done-pts))
                     (goto-char m) (push (point-marker) changed-positions)
