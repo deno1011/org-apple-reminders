@@ -120,6 +120,8 @@ the `C-c r` prefix — no manual `define-key` calls required.
 | `C-c r i` | `org-apple-reminders-set-included-lists` |
 | `C-c r p` | `org-apple-reminders-push-heading` |
 | `C-c r m` | `org-apple-reminders-push-heading` (alias of `C-c r p`) |
+| `C-c r x` | `org-apple-reminders-mark-for-delete` |
+| `C-c r u` | `org-apple-reminders-unmark-delete` |
 | `C-c r d` | `org-apple-reminders-remove-from-apple` |
 | `C-c r D` | `org-apple-reminders-delete-reminder` |
 
@@ -164,6 +166,8 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 | `org-apple-reminders-sync` | Full bidirectional sync (`C-c r R`) |
 | `org-apple-reminders-open-file` | Open `reminders.org` directly (`C-c r f`) |
 | `org-apple-reminders-push-heading` | Push the heading at point — or every heading in the active region — to Apple, from any org file (`C-c r p`, also `C-c r m`) |
+| `org-apple-reminders-mark-for-delete` | Mark linked reminder heading(s) for batched Apple deletion on the next full sync (`C-c r x`) |
+| `org-apple-reminders-unmark-delete` | Remove the pending delete mark from linked reminder heading(s) (`C-c r u`) |
 | `org-apple-reminders-remove-from-apple` | Delete the Apple reminder but keep the org heading — point, or every reminder in the region (`C-c r d`) |
 | `org-apple-reminders-delete-reminder` | Delete reminder from Apple **and** org — point, or every reminder in the region (`C-c r D`) |
 | `org-apple-reminders-show-lists` | List all Apple Reminders lists (`C-c r l`) |
@@ -212,6 +216,15 @@ org file as a plain TODO and is never pushed back. Re-link it later with
 `C-c r p`.
 
 ### Deleting reminders
+
+For deferred cleanup, use **`org-apple-reminders-mark-for-delete`**
+(`C-c r x`). It sets `REMINDER_DELETE: t` on the linked reminder at point, or
+on every linked reminder in the active region. The next full sync
+(`C-c r R`) deletes all marked reminders from Apple in one batch, marks the
+org headings `DONE`, strips their `REMINDER_*` link properties, and leaves
+`REMINDER_NOSYNC: t` so they are not recreated. Use
+**`org-apple-reminders-unmark-delete`** (`C-c r u`) before syncing if you
+marked something by mistake.
 
 Two commands remove reminders, both with a confirmation prompt:
 

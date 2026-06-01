@@ -38,6 +38,7 @@
 ;;   - Selective list sync via `org-apple-reminders-included-lists'
 ;;   - Push any org heading, or a whole region of headings, to Apple;
 ;;     move reminders between lists without duplicating them
+;;   - Mark reminders for batched Apple deletion on the next full sync
 ;;   - Progress cookies [N/M] on list headings
 ;;   - Org-agenda integration
 ;;   - Org-capture template
@@ -900,7 +901,8 @@ Also set REMINDER_NOSYNC so the heading is never pushed back to Apple."
   (save-excursion
     (org-back-to-heading t)
     (dolist (prop '("REMINDER_ID" "REMINDER_LIST"
-                    "REMINDER_APPLE_MOD" "REMINDER_ORG_MOD"))
+                    "REMINDER_APPLE_MOD" "REMINDER_ORG_MOD"
+                    "REMINDER_DELETE"))
       (org-entry-delete nil prop))
     (org-set-property "REMINDER_NOSYNC" "t")))
 
@@ -953,6 +955,100 @@ bind `org-apple-reminders--syncing'."
                       (setq changed t))))
                 (when (and changed (buffer-modified-p))
                   (save-buffer))))))))))
+
+(defun org-apple-reminders--delete-marked-reminders (apple-by-id)
+  "Delete headings marked REMINDER_DELETE from Apple and finalize them in org.
+APPLE-BY-ID is the fetched Apple reminder hash for the current full sync.
+Return the number of marked headings finalized in org.  Callers must bind
+`org-apple-reminders--syncing'."
+  (let ((n 0)
+        (ids nil))
+    (dolist (file (org-apple-reminders--known-files))
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (let (changed)
+            (org-map-entries
+             (lambda ()
+               (when (org-entry-get nil "REMINDER_DELETE")
+                 (let ((id (org-entry-get nil "REMINDER_ID"))
+                       (rlist (org-entry-get nil "REMINDER_LIST")))
+                   (when id
+                     (push id ids)
+                     (when (and rlist (gethash id apple-by-id))
+                       (org-apple-reminders--delete-in-apple rlist id)))
+                   (org-apple-reminders--mark-done-at-point)
+                   (org-apple-reminders--strip-link-properties)
+                   (setq changed t
+                         n (1+ n)))))
+             nil nil)
+            (when (and changed (buffer-modified-p))
+              (save-buffer))))))
+    (org-apple-reminders--wait-for-async-jxa)
+    (org-apple-reminders--mark-done-in-other-known-files (delete-dups ids))
+    n))
+
+;;;###autoload
+(defun org-apple-reminders-mark-for-delete (&optional beg end)
+  "Mark reminder heading(s) for deletion on the next full sync.
+Set REMINDER_DELETE=t on the linked reminder at point, or on every linked
+reminder in the active region.  The next `org-apple-reminders-sync' (`C-c r R')
+deletes those Apple reminders in a batch, marks the org headings DONE, strips
+their REMINDER_* link properties, and leaves REMINDER_NOSYNC=t so they are not
+created again."
+  (interactive
+   (list (and (use-region-p) (region-beginning))
+         (and (use-region-p) (region-end))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not in an org-mode buffer"))
+  (let ((markers (if (and beg end)
+                     (org-apple-reminders--region-reminder-markers beg end)
+                   (save-excursion
+                     (org-back-to-heading t)
+                     (when (org-entry-get nil "REMINDER_ID")
+                       (list (point-marker)))))))
+    (unless markers
+      (user-error "No linked reminders to mark"))
+    (dolist (m markers)
+      (when (marker-buffer m)
+        (with-current-buffer (marker-buffer m)
+          (save-excursion
+            (goto-char m)
+            (org-set-property "REMINDER_DELETE" "t"))))
+      (set-marker m nil))
+    (when (and (buffer-file-name) (buffer-modified-p))
+      (save-buffer))
+    (message "Marked %d reminder%s for deletion on next C-c r R"
+             (length markers) (if (= (length markers) 1) "" "s"))))
+
+;;;###autoload
+(defun org-apple-reminders-unmark-delete (&optional beg end)
+  "Remove REMINDER_DELETE from reminder heading(s).
+With an active region, unmark every linked reminder in the region.  Without a
+region, unmark the linked reminder at point."
+  (interactive
+   (list (and (use-region-p) (region-beginning))
+         (and (use-region-p) (region-end))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not in an org-mode buffer"))
+  (let ((markers (if (and beg end)
+                     (org-apple-reminders--region-reminder-markers beg end)
+                   (save-excursion
+                     (org-back-to-heading t)
+                     (when (org-entry-get nil "REMINDER_ID")
+                       (list (point-marker)))))))
+    (unless markers
+      (user-error "No linked reminders to unmark"))
+    (dolist (m markers)
+      (when (marker-buffer m)
+        (with-current-buffer (marker-buffer m)
+          (save-excursion
+            (goto-char m)
+            (org-entry-delete nil "REMINDER_DELETE"))))
+      (set-marker m nil))
+    (when (and (buffer-file-name) (buffer-modified-p))
+      (save-buffer))
+    (message "Removed delete mark from %d reminder%s"
+             (length markers) (if (= (length markers) 1) "" "s"))))
 
 ;;;###autoload
 (defun org-apple-reminders-delete-reminder (&optional beg end)
@@ -1266,6 +1362,8 @@ other linked files only push updates to already-stamped headings."
               (state  (org-get-todo-state))
               (cached (and id (org-apple-reminders--find-in-cache id))))
          (cond
+          ((org-entry-get nil "REMINDER_DELETE")
+           nil)
           ((and (null id) is-sync-file (member state '("TODO" "NEXT" "WAITING"))
                 (not (org-entry-get nil "REMINDER_NOSYNC")))
            (push (point-marker) new-pts))
@@ -1360,6 +1458,7 @@ Conflict resolution per linked heading (3-way):
   pushes (Apple gets the user's value).
 - DONE in org, open in Apple → push completion to Apple.
 - Open in org, done/gone in Apple → mark DONE in org.
+- REMINDER_DELETE in org → delete from Apple, mark DONE, strip link properties.
 New Apple items not linked in any known file → pulled into sync-file only.
 
 Before fetching, modified known-file buffers are auto-saved (which
@@ -1386,12 +1485,14 @@ Apple's post-push state."
                          ht))
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
+         (n-deleted 0)
          (n-pruned 0))
     (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
         (insert "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n")))
     (let ((org-apple-reminders--syncing t))
+      (setq n-deleted (org-apple-reminders--delete-marked-reminders apple-by-id))
       ;; Phase 1: update existing linked items across all known files
       (dolist (file (org-apple-reminders--known-files))
         (when (file-exists-p file)
@@ -1666,8 +1767,8 @@ Apple's post-push state."
               (dolist (m (nreverse changed-positions))
                 (when (marker-position m)
                   (goto-char m) (org-reveal) (set-marker m nil)))))))
-    (message "Reminders: %d←DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated  %d pruned"
-             n-done n-reopened n-pushed n-pulled n-updated n-pruned))))
+    (message "Reminders: %d deleted  %d←DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated  %d pruned"
+             n-deleted n-done n-reopened n-pushed n-pulled n-updated n-pruned))))
 
 ;;; Background pull (Apple → org, async)
 
@@ -1700,7 +1801,8 @@ Apple's post-push state."
                             (lambda ()
                               (let* ((id    (org-entry-get nil "REMINDER_ID"))
                                      (state (org-get-todo-state)))
-                                (when id
+                                (when (and id
+                                           (not (org-entry-get nil "REMINDER_DELETE")))
                                   (cond
                                    ((and (member state '("TODO" "NEXT" "WAITING"))
                                          (let ((a (gethash id apple-by-id)))
@@ -1721,6 +1823,7 @@ Apple's post-push state."
                               (let* ((id     (org-entry-get nil "REMINDER_ID"))
                                      (aitem  (when id (gethash id apple-by-id))))
                                 (when (and id aitem
+                                           (not (org-entry-get nil "REMINDER_DELETE"))
                                            (not (eq (alist-get 'completed aitem) t))
                                            (member (org-get-todo-state) '("TODO" "NEXT" "WAITING")))
                                   (let* ((a-prio    (or (alist-get 'priority aitem) 0))
@@ -1999,6 +2102,8 @@ Run once after upgrading from a version that stored items at level 1."
     ;; `m' is kept as an alias for `p' — push handles single headings and
     ;; regions, so a separate "move" command is no longer needed.
     (define-key map (kbd "m") #'org-apple-reminders-push-heading)
+    (define-key map (kbd "x") #'org-apple-reminders-mark-for-delete)
+    (define-key map (kbd "u") #'org-apple-reminders-unmark-delete)
     (define-key map (kbd "d") #'org-apple-reminders-remove-from-apple)
     (define-key map (kbd "D") #'org-apple-reminders-delete-reminder)
     map)
@@ -2006,7 +2111,7 @@ Run once after upgrading from a version that stored items at level 1."
 `org-apple-reminders-setup' binds this under
 `org-apple-reminders-keymap-prefix' (default \"C-c r\").  Keys
 `p' and `m' both run `org-apple-reminders-push-heading' (single
-heading or active region).  The heading commands (p/m/d/D)
+heading or active region).  The heading commands (p/m/x/u/d/D)
 `user-error' when there is nothing to act on, so the whole map is
 safe to bind globally.")
 ;; Allow the variable to be used directly as a prefix key.
@@ -2025,10 +2130,11 @@ Call this once from your init file after setting
 Binds `org-apple-reminders-command-map' under
 `org-apple-reminders-keymap-prefix' (default \"C-c r\"):
 
-  C-c r R   sync                C-c r a   add reminder
-  C-c r f   open sync file      C-c r l   show lists
-  C-c r L   create list         C-c r X   delete list
-  C-c r i   choose synced lists C-c r p   push heading to Apple
+  C-c r R   sync                C-c r f   open sync file
+  C-c r l   show lists          C-c r L   create list
+  C-c r X   delete list         C-c r i   choose synced lists
+  C-c r p   push heading        C-c r m   push/move alias
+  C-c r x   mark delete on sync C-c r u   unmark delete on sync
   C-c r d   remove from Apple (keep org heading)
   C-c r D   delete reminder (Apple and org)"
   (when org-apple-reminders-keymap-prefix
