@@ -4,7 +4,7 @@
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-7
-;; Version: 1.14
+;; Version: 1.15
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -69,6 +69,7 @@
 (defvar org-state)
 (defvar org-capture-templates)
 (defvar org-agenda-custom-commands)
+(defvar org-agenda-finalize-hook)
 
 (require 'cl-lib)
 (require 'org)
@@ -170,6 +171,24 @@ Set to nil to bind no prefix and wire up the keymap yourself, e.g.:
   (keymap-global-set \"C-c a\" org-apple-reminders-command-map)"
   :type '(choice (key-sequence :tag "Prefix key")
                  (const :tag "Do not bind" nil))
+  :group 'org-apple-reminders)
+
+(defcustom org-apple-reminders-delete-mark-prefix "[DELETE FROM APPLE] "
+  "Visible prefix shown for headings marked REMINDER_DELETE=t.
+The prefix is display-only: it is not written into the org heading, does
+not create an org tag, and does not affect TODO/GTD state.  The
+REMINDER_DELETE property remains the source of truth for batch deletion."
+  :type 'string
+  :group 'org-apple-reminders)
+
+(defface org-apple-reminders-delete-mark-face
+  '((t :inherit warning :weight bold))
+  "Face applied to headings and agenda lines marked for Apple deletion."
+  :group 'org-apple-reminders)
+
+(defface org-apple-reminders-delete-mark-prefix-face
+  '((t :inherit error :weight bold))
+  "Face used for the display-only delete-mark prefix."
   :group 'org-apple-reminders)
 
 ;;; List filter
@@ -982,6 +1001,7 @@ Return the number of marked headings finalized in org.  Callers must bind
                          n (1+ n)))))
              nil nil)
             (when (and changed (buffer-modified-p))
+              (org-apple-reminders-refresh-delete-mark-visibility)
               (save-buffer))))))
     (org-apple-reminders--wait-for-async-jxa)
     (org-apple-reminders--mark-done-in-other-known-files (delete-dups ids))
@@ -1015,6 +1035,7 @@ created again."
             (goto-char m)
             (org-set-property "REMINDER_DELETE" "t"))))
       (set-marker m nil))
+    (org-apple-reminders-refresh-delete-mark-visibility)
     (when (and (buffer-file-name) (buffer-modified-p))
       (save-buffer))
     (message "Marked %d reminder%s for deletion on next C-c r R"
@@ -1045,6 +1066,7 @@ region, unmark the linked reminder at point."
             (goto-char m)
             (org-entry-delete nil "REMINDER_DELETE"))))
       (set-marker m nil))
+    (org-apple-reminders-refresh-delete-mark-visibility)
     (when (and (buffer-file-name) (buffer-modified-p))
       (save-buffer))
     (message "Removed delete mark from %d reminder%s"
@@ -2048,6 +2070,82 @@ Apple's post-push state."
                      (cl-remove-if-not #'file-exists-p ',all-files))
                     (org-agenda-overriding-header "Apple Reminders"))))))
 
+;;; Delete mark visibility
+
+(defvar-local org-apple-reminders--delete-mark-overlays nil
+  "Display overlays showing REMINDER_DELETE headings in the current buffer.")
+
+(defun org-apple-reminders--clear-delete-mark-overlays ()
+  "Remove all delete-mark visibility overlays from the current buffer."
+  (mapc #'delete-overlay org-apple-reminders--delete-mark-overlays)
+  (setq org-apple-reminders--delete-mark-overlays nil))
+
+(defun org-apple-reminders--delete-prefix-string ()
+  "Return the propertized display-only delete marker prefix."
+  (propertize org-apple-reminders-delete-mark-prefix
+              'face 'org-apple-reminders-delete-mark-prefix-face))
+
+(defun org-apple-reminders--add-delete-mark-overlay (beg end)
+  "Add a visible delete marker overlay from BEG to END."
+  (let ((ov (make-overlay beg end nil nil t)))
+    (overlay-put ov 'org-apple-reminders-delete-mark t)
+    (overlay-put ov 'face 'org-apple-reminders-delete-mark-face)
+    (overlay-put ov 'before-string
+                 (org-apple-reminders--delete-prefix-string))
+    (push ov org-apple-reminders--delete-mark-overlays)))
+
+(defun org-apple-reminders--entry-delete-marked-p (&optional marker)
+  "Return non-nil when MARKER or point is on a REMINDER_DELETE heading."
+  (if marker
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)
+          (ignore-errors
+            (org-back-to-heading t)
+            (org-entry-get nil "REMINDER_DELETE"))))
+    (save-excursion
+      (ignore-errors
+        (org-back-to-heading t)
+        (org-entry-get nil "REMINDER_DELETE")))))
+
+(defun org-apple-reminders-refresh-delete-mark-visibility ()
+  "Refresh display-only markers for headings marked REMINDER_DELETE=t.
+In org buffers this marks the heading line itself.  In org-agenda buffers
+this marks agenda rows whose source heading carries REMINDER_DELETE=t."
+  (interactive)
+  (org-apple-reminders--clear-delete-mark-overlays)
+  (cond
+   ((derived-mode-p 'org-mode)
+    (org-with-wide-buffer
+     (save-excursion
+       (goto-char (point-min))
+       (while (re-search-forward org-heading-regexp nil t)
+         (let ((line-beg (line-beginning-position))
+               (line-end (line-end-position)))
+           (goto-char line-beg)
+           (when (org-entry-get nil "REMINDER_DELETE")
+             (org-apple-reminders--add-delete-mark-overlay line-beg line-end))
+           (forward-line 1))))))
+   ((derived-mode-p 'org-agenda-mode)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let* ((line-beg (line-beginning-position))
+               (line-end (line-end-position))
+               (marker (or (get-text-property line-beg 'org-marker)
+                           (get-text-property line-beg 'org-hd-marker))))
+          (when (and (markerp marker)
+                     (marker-buffer marker)
+                     (with-current-buffer (marker-buffer marker)
+                       (org-apple-reminders--entry-delete-marked-p marker)))
+            (org-apple-reminders--add-delete-mark-overlay line-beg line-end)))
+        (forward-line 1))))))
+
+(defun org-apple-reminders--refresh-delete-mark-visibility-maybe ()
+  "Refresh delete-mark overlays when the current buffer is Org or agenda."
+  (when (derived-mode-p 'org-mode 'org-agenda-mode)
+    (org-apple-reminders-refresh-delete-mark-visibility)))
+
 ;;; Migration helper
 
 (defun org-apple-reminders-migrate-flat-headings ()
@@ -2147,6 +2245,10 @@ Binds `org-apple-reminders-command-map' under
   (require 'org-capture)
   (org-apple-reminders--ensure-agenda-files)
   (add-hook 'org-agenda-mode-hook #'org-apple-reminders--ensure-agenda-files)
+  (add-hook 'org-mode-hook
+            #'org-apple-reminders--refresh-delete-mark-visibility-maybe)
+  (add-hook 'org-agenda-finalize-hook
+            #'org-apple-reminders--refresh-delete-mark-visibility-maybe)
   (org-apple-reminders--setup-capture)
   (org-apple-reminders--start-sync-timer)
   (run-with-idle-timer 3 nil #'org-apple-reminders--background-pull))

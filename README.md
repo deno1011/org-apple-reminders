@@ -120,8 +120,8 @@ the `C-c r` prefix — no manual `define-key` calls required.
 | `C-c r i` | `org-apple-reminders-set-included-lists` |
 | `C-c r p` | `org-apple-reminders-push-heading` |
 | `C-c r m` | `org-apple-reminders-push-heading` (alias of `C-c r p`) |
-| `C-c r x` | `org-apple-reminders-mark-for-delete` |
-| `C-c r u` | `org-apple-reminders-unmark-delete` |
+| `C-c r x` | `org-apple-reminders-mark-for-delete` (shows `[DELETE FROM APPLE]`) |
+| `C-c r u` | `org-apple-reminders-unmark-delete` (removes the visible marker) |
 | `C-c r d` | `org-apple-reminders-remove-from-apple` |
 | `C-c r D` | `org-apple-reminders-delete-reminder` |
 
@@ -166,8 +166,8 @@ The new entry is pushed to Apple on the next save of `reminders.org`.
 | `org-apple-reminders-sync` | Full bidirectional sync (`C-c r R`) |
 | `org-apple-reminders-open-file` | Open `reminders.org` directly (`C-c r f`) |
 | `org-apple-reminders-push-heading` | Push the heading at point — or every heading in the active region — to Apple, from any org file (`C-c r p`, also `C-c r m`) |
-| `org-apple-reminders-mark-for-delete` | Mark linked reminder heading(s) for batched Apple deletion on the next full sync (`C-c r x`) |
-| `org-apple-reminders-unmark-delete` | Remove the pending delete mark from linked reminder heading(s) (`C-c r u`) |
+| `org-apple-reminders-mark-for-delete` | Mark linked reminder heading(s) for batched Apple deletion on the next full sync and show a display-only warning marker (`C-c r x`) |
+| `org-apple-reminders-unmark-delete` | Remove the pending delete mark and visible warning marker from linked reminder heading(s) (`C-c r u`) |
 | `org-apple-reminders-remove-from-apple` | Delete the Apple reminder but keep the org heading — point, or every reminder in the region (`C-c r d`) |
 | `org-apple-reminders-delete-reminder` | Delete reminder from Apple **and** org — point, or every reminder in the region (`C-c r D`) |
 | `org-apple-reminders-show-lists` | List all Apple Reminders lists (`C-c r l`) |
@@ -225,6 +225,11 @@ org headings `DONE`, strips their `REMINDER_*` link properties, and leaves
 `REMINDER_NOSYNC: t` so they are not recreated. Use
 **`org-apple-reminders-unmark-delete`** (`C-c r u`) before syncing if you
 marked something by mistake.
+
+Marked headings and agenda rows are shown with a display-only
+`[DELETE FROM APPLE]` prefix. This is not an org tag, not a TODO state, and is
+not saved into the file; the `REMINDER_DELETE: t` property remains the source
+of truth.
 
 Two commands remove reminders, both with a confirmation prompt:
 

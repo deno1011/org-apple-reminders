@@ -144,6 +144,16 @@ Delete `~/org/reminders-test.org` after each test run to start fresh.
 | 5.3.2 | Delete reminder that was already deleted in Apple | No error; org heading still removed |
 | 5.3.3 | Delete last reminder in a list | List heading remains; `[0/0]` cookie |
 
+### 5.4 Deferred delete visibility
+
+| # | Step | Expected |
+|---|------|----------|
+| 5.4.1 | Place point on a linked reminder heading and press `C-c r x` | Heading immediately shows display-only `[DELETE FROM APPLE]`; property drawer contains `REMINDER_DELETE: t` |
+| 5.4.2 | Collapse the property drawer | The visible delete marker remains on the heading line |
+| 5.4.3 | Open org-agenda and show the reminder | Agenda row also shows `[DELETE FROM APPLE]` |
+| 5.4.4 | Return to the heading and press `C-c r u` | Property and visible marker disappear |
+| 5.4.5 | Mark again, then run `C-c r R` | Apple reminder is deleted; org heading is finalized and the visible marker disappears |
+
 ---
 
 ## 6. Capture (`C-c c A`)
