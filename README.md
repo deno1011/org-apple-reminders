@@ -276,6 +276,11 @@ without prompting, add the file to `org-apple-reminders-file-list-map`.
 Otherwise, full sync will update linked headings in that file but will not
 guess that unrelated plain TODOs should become Apple reminders.
 
+If a whole Apple Reminders list is deleted outside Emacs, the next full sync
+marks the matching top-level section in `reminders.org` as `DONE`. That `DONE`
+section is the marker that the list should not be recreated on later syncs.
+The same marker is used when deleting a list with `C-c r X`.
+
 `org-apple-reminders-remove-from-apple` (`C-c r d`) is the inverse of a
 push: it deletes the Apple-side reminder, removes the `REMINDER_*` link
 properties, and sets `REMINDER_NOSYNC: t` on the heading so it stays in the

@@ -348,10 +348,10 @@ CALLBACK receives the stdout string when the process exits."
 
 ;;;###autoload
 (defun org-apple-reminders-delete-list (name)
-  "Delete the Apple Reminders list NAME and its section from the sync file.
-All reminders in the list are removed from Apple, and the matching
-`* NAME' subtree (with every entry under it) is deleted from
-`org-apple-reminders-sync-file'."
+  "Delete the Apple Reminders list NAME and mark its sync section DONE.
+All reminders in the list are removed from Apple.  The matching
+`* NAME' section in `org-apple-reminders-sync-file' is kept and marked
+DONE so the next sync does not recreate the list."
   (interactive
    (list (completing-read "Delete which list: "
                           (or (org-apple-reminders--cached-list-names)
@@ -375,13 +375,15 @@ All reminders in the list are removed from Apple, and the matching
       (with-current-buffer (find-file-noselect file)
         (let ((org-apple-reminders--syncing t))
           (save-excursion
-            (goto-char (point-min))
-            (when (re-search-forward
-                   (concat "^\\* " (regexp-quote name) "\\(?: \\|$\\)") nil t)
-              (org-back-to-heading t)
-              (delete-region (point)
-                             (save-excursion (org-end-of-subtree t t) (point)))
-              (save-buffer)))))))
+            (org-map-entries
+             (lambda ()
+               (let ((section-name (org-apple-reminders--clean-list-heading
+                                    (org-get-heading t t t t))))
+                 (when (string= section-name name)
+                   (unless (member (org-get-todo-state) '("DONE" "CANCELLED"))
+                     (org-todo "DONE")))))
+             "LEVEL=1" 'file)
+            (save-buffer))))))
   (message "Deleted list: %s" name))
 
 (defun org-apple-reminders-set-included-lists ()
@@ -1378,6 +1380,24 @@ included.  Return the number of sections removed."
     "\\[[0-9]*/[0-9]*\\][ \t]*$" ""
     heading)))
 
+(defun org-apple-reminders--done-list-heading-p ()
+  "Return non-nil when point is at a completed list-section heading."
+  (member (org-get-todo-state) '("DONE" "CANCELLED")))
+
+(defun org-apple-reminders--done-list-section-exists-p (list-name)
+  "Return non-nil when the current buffer has a DONE section for LIST-NAME."
+  (catch 'found
+    (save-excursion
+      (org-map-entries
+       (lambda ()
+         (let ((name (org-apple-reminders--clean-list-heading
+                      (org-get-heading t t t t))))
+           (when (and (string= name list-name)
+                      (org-apple-reminders--done-list-heading-p))
+             (throw 'found t))))
+       "LEVEL=1" 'file))
+    nil))
+
 (defun org-apple-reminders--sync-file-list-at-point ()
   "Return nearest level-1 list name at point in the sync file, or nil."
   (when (org-apple-reminders--in-sync-file-p)
@@ -1389,7 +1409,8 @@ included.  Return the number of sections removed."
         (when (= (or (org-current-level) 0) 1)
           (let ((name (org-apple-reminders--clean-list-heading
                        (org-get-heading t t t t))))
-            (unless (string-empty-p name)
+            (unless (or (string-empty-p name)
+                        (org-apple-reminders--done-list-heading-p))
               name)))))))
 
 (defun org-apple-reminders--sync-file-list-heading-p ()
@@ -1412,10 +1433,33 @@ reminder item."
             (let ((name (org-apple-reminders--clean-list-heading
                          (org-get-heading t t t t))))
               (when (and (not (string-empty-p name))
+                         (not (org-apple-reminders--done-list-heading-p))
                          (org-apple-reminders--list-included-p name)
                          (org-apple-reminders--ensure-list name))
                 (setq n (1+ n)))))
           "LEVEL=1" 'file))))
+    n))
+
+(defun org-apple-reminders--mark-missing-apple-lists-done (previous-list-names
+                                                          apple-list-names)
+  "Mark sync-file list sections DONE when their Apple list is missing.
+PREVIOUS-LIST-NAMES is the list names from the previous Apple fetch, and
+APPLE-LIST-NAMES is the list names returned by Apple now.  DONE list sections
+are the marker that the list should not be recreated by later syncs.  Return
+the number of sections newly marked DONE."
+  (let ((n 0)
+        (org-apple-reminders--syncing t))
+    (org-map-entries
+     (lambda ()
+       (let ((name (org-apple-reminders--clean-list-heading
+                    (org-get-heading t t t t))))
+         (when (and (not (string-empty-p name))
+                    (member name previous-list-names)
+                    (not (member name apple-list-names))
+                    (not (org-apple-reminders--done-list-heading-p)))
+           (org-todo "DONE")
+           (setq n (1+ n)))))
+     "LEVEL=1" 'file)
     n))
 
 (defun org-apple-reminders--file-mapped-list ()
@@ -1601,15 +1645,19 @@ Apple's post-push state."
   (org-apple-reminders--wait-for-async-jxa)
   (let* ((default-list (org-apple-reminders--default-list))
          (sync-file    (expand-file-name org-apple-reminders-sync-file))
+         (previous-list-names
+          (mapcar (lambda (entry) (alist-get 'list entry))
+                  org-apple-reminders--cache))
          (raw          (progn
                          (unless (file-exists-p sync-file)
                            (with-temp-file sync-file
                              (insert "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n")))
-                         (org-apple-reminders--ensure-sync-file-lists)
                          (org-apple-reminders--jxa-run org-apple-reminders--fetch-script)))
          (data         (condition-case nil
                            (json-parse-string raw :object-type 'alist :array-type 'list)
                          (error (user-error "Reminders sync: fetch failed — %s" raw))))
+         (apple-list-names
+          (mapcar (lambda (entry) (alist-get 'list entry)) data))
          (apple-by-id  (let ((ht (make-hash-table :test #'equal)))
                          (dolist (entry data)
                            (dolist (item (alist-get 'items entry))
@@ -1618,6 +1666,7 @@ Apple's post-push state."
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
          (n-deleted 0)
+         (n-lists-done 0)
          (n-pruned 0))
     (setq org-apple-reminders--cache data)
     (let ((org-apple-reminders--syncing t))
@@ -1861,16 +1910,28 @@ Apple's post-push state."
       (with-current-buffer (find-file-noselect sync-file)
         (org-save-outline-visibility t
           (let (changed-positions)
+            ;; If a list that was known in the previous Apple fetch is now
+            ;; gone from Apple, mark its sync-file section DONE.  DONE list
+            ;; sections are the marker that the list should not be recreated.
+            (when previous-list-names
+              (setq n-lists-done
+                    (org-apple-reminders--mark-missing-apple-lists-done
+                     previous-list-names apple-list-names)))
             ;; Drop sections for lists removed from the included-lists set
             ;; so reminders.org keeps mirroring the current selection.
             (setq n-pruned (org-apple-reminders--prune-excluded-lists))
+            ;; Ensure active local list sections exist in Apple.  This runs
+            ;; after deletion detection so Apple-side deletions become DONE
+            ;; markers instead of being immediately recreated.
+            (org-apple-reminders--ensure-sync-file-lists)
             ;; Ensure every explicitly-included list has a `* List' section,
             ;; even when it is empty, so the selection is mirrored exactly.
             (let ((included (org-apple-reminders--effective-included-lists)))
               (when included
                 (dolist (lname included)
-                  (save-excursion
-                    (org-apple-reminders--goto-list-heading lname)))))
+                  (unless (org-apple-reminders--done-list-section-exists-p lname)
+                    (save-excursion
+                      (org-apple-reminders--goto-list-heading lname))))))
             (dolist (entry data)
               (let ((lname (alist-get 'list  entry))
                     (items (alist-get 'items entry)))
@@ -1899,8 +1960,8 @@ Apple's post-push state."
               (dolist (m (nreverse changed-positions))
                 (when (marker-position m)
                   (goto-char m) (org-reveal) (set-marker m nil)))))))
-    (message "Reminders: %d deleted  %d←DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated  %d pruned"
-             n-deleted n-done n-reopened n-pushed n-pulled n-updated n-pruned))))
+    (message "Reminders: %d deleted  %d←DONE  %d lists→DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated  %d pruned"
+             n-deleted n-done n-lists-done n-reopened n-pushed n-pulled n-updated n-pruned))))
 
 ;;; Background pull (Apple → org, async)
 
@@ -1911,7 +1972,12 @@ Apple's post-push state."
      org-apple-reminders--fetch-script
      (lambda (raw)
        (condition-case nil
-           (let* ((data         (json-parse-string raw :object-type 'alist :array-type 'list))
+           (let* ((previous-list-names
+                   (mapcar (lambda (entry) (alist-get 'list entry))
+                           org-apple-reminders--cache))
+                  (data         (json-parse-string raw :object-type 'alist :array-type 'list))
+                  (apple-list-names
+                   (mapcar (lambda (entry) (alist-get 'list entry)) data))
                   (sync-file    (expand-file-name org-apple-reminders-sync-file))
                   (apple-by-id  (let ((ht (make-hash-table :test #'equal)))
                                   (dolist (entry data)
@@ -1929,6 +1995,9 @@ Apple's post-push state."
                      (with-current-buffer (find-file-noselect file)
                        (org-save-outline-visibility t
                          (let (done-pts reopen-pts field-updates)
+                           (when (and is-sync-file previous-list-names)
+                             (org-apple-reminders--mark-missing-apple-lists-done
+                              previous-list-names apple-list-names))
                            (org-map-entries
                             (lambda ()
                               (let* ((id    (org-entry-get nil "REMINDER_ID"))
