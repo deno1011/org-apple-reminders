@@ -126,6 +126,11 @@ heading in this order:
 4. `org-apple-reminders-sync-list` / the default Apple list, only when no more
    specific context exists.
 
+That last fallback means a known org file with plain TODOs but no list section,
+no `REMINDER_LIST`, and no file mapping will create those reminders in the
+configured/default Apple Reminders list during full sync. Use
+`REMINDER_NOSYNC: t` on headings that should stay local only.
+
 In the sync file, top-level headings are list sections and are created in
 Apple even when they have no child tasks. That means:
 
@@ -145,6 +150,10 @@ If you write a TODO at top level:
 full sync treats `Call supplier` as an Apple list name. It creates/uses the
 list, but does not create a reminder with the same name. Child TODOs under that
 heading are created as reminders in the `Call supplier` list.
+
+Org subheadings are synced as separate reminders, not as Apple subtasks. Apple
+Reminders subtask hierarchy is not modeled by this package yet, so a `*** TODO`
+under a synced task is created as its own reminder in the same inferred list.
 
 Use `org-apple-reminders-file-list-map` when you keep reminders in separate
 org files and want `C-c r R` to create new plain TODOs from those files. Each
@@ -279,7 +288,9 @@ guess that unrelated plain TODOs should become Apple reminders.
 If a whole Apple Reminders list is deleted outside Emacs, the next full sync
 marks the matching top-level section in `reminders.org` as `DONE`. That `DONE`
 section is the marker that the list should not be recreated on later syncs.
-The same marker is used when deleting a list with `C-c r X`.
+Synced list sections carry `REMINDER_LIST_SYNCED`, `REMINDER_LIST_NAME`, and,
+when Apple exposes one, `REMINDER_LIST_ID` properties so this survives Emacs
+restarts. The same marker is used when deleting a list with `C-c r X`.
 
 `org-apple-reminders-remove-from-apple` (`C-c r d`) is the inverse of a
 push: it deletes the Apple-side reminder, removes the `REMINDER_*` link
