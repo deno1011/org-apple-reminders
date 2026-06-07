@@ -283,6 +283,9 @@ already contains at least one REMINDER_ID (so files linked via
 (defvar org-apple-reminders--sync-timer nil
   "Timer handle for periodic background pulls.")
 
+(defvar org-apple-reminders--top-level-todo-warnings nil
+  "Hash of sync-file top-level TODO list names already warned in this run.")
+
 ;;; JXA helpers
 
 (defun org-apple-reminders--jxa-run (script)
@@ -1389,6 +1392,23 @@ included.  Return the number of sections removed."
         (when (= (or (org-current-level) 0) 1)
           (let ((name (org-apple-reminders--clean-list-heading
                        (org-get-heading t t t t))))
+            (when (and (member (org-get-todo-state) '("TODO" "NEXT" "WAITING"))
+                       (not (string-empty-p name)))
+              (let* ((warnings
+                      (or org-apple-reminders--top-level-todo-warnings
+                          (setq org-apple-reminders--top-level-todo-warnings
+                                (make-hash-table :test #'equal))))
+                     (key (list (buffer-file-name) name)))
+                (unless (gethash key warnings)
+                  (puthash key t warnings)
+                  (display-warning
+                   'org-apple-reminders
+                   (format
+                    "Top-level reminder TODO \"%s\" in %s creates/uses Apple list \"%s\". Indent it as ** TODO under an existing * List heading to use that list instead."
+                    name
+                    (file-name-nondirectory (or (buffer-file-name) "current buffer"))
+                    name)
+                   :warning))))
             (unless (string-empty-p name)
               name)))))))
 
@@ -1439,6 +1459,8 @@ Auto-creation from unlinked headings only happens in the value of
 properties, or files matched by `org-apple-reminders-file-list-map';
 other linked files only push updates to already-stamped headings."
   (let* ((n-new 0) (n-updated 0)
+         (org-apple-reminders--top-level-todo-warnings
+          (make-hash-table :test #'equal))
          new-pts)
     (org-map-entries
      (lambda ()
@@ -1541,6 +1563,8 @@ Conflict resolution per linked heading (3-way):
   Target list precedence is: explicit REMINDER_LIST, nearest top-level list
   heading in the sync file, file regexp in `org-apple-reminders-file-list-map',
   then the configured/default list.
+  A top-level TODO in the sync file is itself a top-level list heading, so it
+  creates/uses a list named after the TODO title and emits a warning.
 - No REMINDER_ID and no target list → leave the heading alone.  Use
   `C-c r p' for one-off reminders from arbitrary org files.
 - Apple modDate newer (apple-changed) → Apple wins: pull all fields,
@@ -1582,7 +1606,9 @@ Apple's post-push state."
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
          (n-deleted 0)
-         (n-pruned 0))
+         (n-pruned 0)
+         (org-apple-reminders--top-level-todo-warnings
+          (make-hash-table :test #'equal)))
     (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file

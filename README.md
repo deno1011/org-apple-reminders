@@ -126,6 +126,25 @@ heading in this order:
 4. `org-apple-reminders-sync-list` / the default Apple list, only when no more
    specific context exists.
 
+In the sync file, top-level headings are list sections. That means:
+
+```org
+* Work
+** TODO Call supplier
+```
+
+creates a reminder in Apple list `Work`.
+
+If you accidentally write the task at top level:
+
+```org
+* TODO Call supplier
+```
+
+full sync treats `Call supplier` as a new Apple list name, creates/adds the
+reminder there, and shows a warning. To place it in an existing list, indent it
+as `** TODO` under that list heading.
+
 Use `org-apple-reminders-file-list-map` when you keep reminders in separate
 org files and want `C-c r R` to create new plain TODOs from those files. Each
 entry maps a file path regexp to an Apple Reminders list name:

@@ -425,6 +425,8 @@ non-nil the save hook and the live advice stand down, so the package never
 reacts to its own buffer edits.  =--cache= holds the alist of lists and items
 from the last fetch — the save hook diffs against it instead of calling Apple
 on every save.  =--sync-timer= holds the repeating background-pull timer.
+=--top-level-todo-warnings= de-duplicates warnings for sync-file list names
+that look like reminders but are written at list-section level.
 
 #+begin_src emacs-lisp
 ;;; Internal state
@@ -437,6 +439,9 @@ on every save.  =--sync-timer= holds the repeating background-pull timer.
 
 (defvar org-apple-reminders--sync-timer nil
   "Timer handle for periodic background pulls.")
+
+(defvar org-apple-reminders--top-level-todo-warnings nil
+  "Hash of sync-file top-level TODO list names already warned in this run.")
 #+end_src
 
 * JXA helpers
@@ -1702,6 +1707,23 @@ included.  Return the number of sections removed."
         (when (= (or (org-current-level) 0) 1)
           (let ((name (org-apple-reminders--clean-list-heading
                        (org-get-heading t t t t))))
+            (when (and (member (org-get-todo-state) '("TODO" "NEXT" "WAITING"))
+                       (not (string-empty-p name)))
+              (let* ((warnings
+                      (or org-apple-reminders--top-level-todo-warnings
+                          (setq org-apple-reminders--top-level-todo-warnings
+                                (make-hash-table :test #'equal))))
+                     (key (list (buffer-file-name) name)))
+                (unless (gethash key warnings)
+                  (puthash key t warnings)
+                  (display-warning
+                   'org-apple-reminders
+                   (format
+                    "Top-level reminder TODO \"%s\" in %s creates/uses Apple list \"%s\". Indent it as ** TODO under an existing * List heading to use that list instead."
+                    name
+                    (file-name-nondirectory (or (buffer-file-name) "current buffer"))
+                    name)
+                   :warning))))
             (unless (string-empty-p name)
               name)))))))
 
@@ -1756,6 +1778,12 @@ or the current file matches =org-apple-reminders-file-list-map=.  Unmapped
 files remain update-only for already-linked headings.  New-item creation is
 synchronous so the returned id can be stamped back.
 
+Top-level headings in the sync file are list sections.  A top-level
+=* TODO Call supplier= is therefore treated as a new Apple list named
+="Call supplier"=, and the package shows a warning telling the user to indent
+the heading as =** TODO= under an existing =* List= heading if that was the
+intent.  This avoids silently assigning the task to the preceding list.
+
 #+begin_src emacs-lisp
 ;;; Push-only (org → Apple): called from save hook
 
@@ -1766,6 +1794,8 @@ Auto-creation from unlinked headings only happens in the value of
 properties, or files matched by `org-apple-reminders-file-list-map';
 other linked files only push updates to already-stamped headings."
   (let* ((n-new 0) (n-updated 0)
+         (org-apple-reminders--top-level-todo-warnings
+          (make-hash-table :test #'equal))
          new-pts)
     (org-map-entries
      (lambda ()
@@ -1889,6 +1919,8 @@ Conflict resolution per linked heading (3-way):
   Target list precedence is: explicit REMINDER_LIST, nearest top-level list
   heading in the sync file, file regexp in `org-apple-reminders-file-list-map',
   then the configured/default list.
+  A top-level TODO in the sync file is itself a top-level list heading, so it
+  creates/uses a list named after the TODO title and emits a warning.
 - No REMINDER_ID and no target list → leave the heading alone.  Use
   `C-c r p' for one-off reminders from arbitrary org files.
 - Apple modDate newer (apple-changed) → Apple wins: pull all fields,
@@ -1930,7 +1962,9 @@ Apple's post-push state."
          (id-index     (org-apple-reminders--build-id-index))
          (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
          (n-deleted 0)
-         (n-pruned 0))
+         (n-pruned 0)
+         (org-apple-reminders--top-level-todo-warnings
+          (make-hash-table :test #'equal)))
     (setq org-apple-reminders--cache data)
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
