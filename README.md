@@ -77,8 +77,7 @@ Clone this repository and add it to your load path:
 | `org-apple-reminders-included-lists` | `nil` (all) | Config-declared lists to sync; nil means all lists |
 | `org-apple-reminders-included-lists-prefer-config` | `nil` | If non-nil, the config list always wins over the saved one |
 | `org-apple-reminders-saved-included-lists` | `unset` | Set by `C-c r i`, persisted to `custom-file` — don't edit by hand |
-| `org-apple-reminders-extra-files` | `nil` | Extra org files scanned for linked reminder headings |
-| `org-apple-reminders-file-list-map` | `nil` | Optional mapping from org files to Apple list names for auto-creating new TODOs during full sync |
+| `org-apple-reminders-extra-files` | `nil` | Extra org files scanned for reminder headings; level-1 headings are Apple list sections |
 | `org-apple-reminders-keymap-prefix` | `"C-c r"` | Prefix key for the command map; `nil` to not bind |
 
 Set `org-apple-reminders-included-lists` to restrict which Apple Reminders lists are pulled into org:
@@ -120,19 +119,22 @@ Full sync chooses the list for a new unlinked `TODO` / `NEXT` / `WAITING`
 heading in this order:
 
 1. Existing `REMINDER_LIST` property on the heading.
-2. The nearest top-level list section in `org-apple-reminders-sync-file`, for
+2. The nearest top-level list section in any known reminder org file, for
    example a heading under `* Work` goes to the Apple list `Work`.
-3. A matching entry in `org-apple-reminders-file-list-map`.
-4. `org-apple-reminders-sync-list` / the default Apple list, only when no more
+3. `org-apple-reminders-sync-list` / the default Apple list, only when no more
    specific context exists.
 
 That last fallback means a known org file with plain TODOs but no list section,
-no `REMINDER_LIST`, and no file mapping will create those reminders in the
-configured/default Apple Reminders list during full sync. Use
-`REMINDER_NOSYNC: t` on headings that should stay local only.
+and no `REMINDER_LIST`, will create those reminders in the configured/default
+Apple Reminders list during full sync. Use `REMINDER_NOSYNC: t` on headings
+that should stay local only.
 
-In the sync file, top-level headings are list sections and are created in
-Apple even when they have no child tasks. That means:
+In every known reminder org file, plain top-level headings are list sections
+and are created in Apple even when they have no child tasks. A top-level TODO
+with child headings is also treated as a list section, so accidentally
+unindented list headings do not become duplicate reminders. A bare top-level
+TODO without children is a reminder item and falls back to the configured/default
+Apple Reminders list. That means:
 
 ```org
 * Work
@@ -154,22 +156,6 @@ heading are created as reminders in the `Call supplier` list.
 Org subheadings are synced as separate reminders, not as Apple subtasks. Apple
 Reminders subtask hierarchy is not modeled by this package yet, so a `*** TODO`
 under a synced task is created as its own reminder in the same inferred list.
-
-Use `org-apple-reminders-file-list-map` when you keep reminders in separate
-org files and want `C-c r R` to create new plain TODOs from those files. Each
-entry maps a file path regexp to an Apple Reminders list name:
-
-```emacs-lisp
-(setq org-apple-reminders-file-list-map
-      '(("/work/tasks\\.org\\'" . "Work")
-        ("/personal/home\\.org\\'" . "Home")
-        ("/shopping\\.org\\'" . "Shopping")))
-```
-
-With this setup, a new `* TODO Call supplier` in `work/tasks.org` is created
-in Apple list `Work` during `C-c r R`. A new TODO in an unmapped org file is
-left alone by full sync; use `C-c r p` for one-off reminders from arbitrary
-files.
 
 ### Key bindings
 
@@ -216,7 +202,7 @@ Full bidirectional sync between `org-apple-reminders-sync-file` and all your App
 Existing linked reminders are synced wherever they live: the sync file,
 `org-apple-reminders-extra-files`, agenda files, and open org buffers. New
 plain TODOs are auto-created only when the target list can be inferred from a
-list section, an explicit `REMINDER_LIST`, or `org-apple-reminders-file-list-map`.
+list section, an explicit `REMINDER_LIST`, or the configured/default list.
 
 Background pulls happen automatically every `org-apple-reminders-auto-sync-interval` seconds and whenever Emacs is idle for 3 seconds after startup.
 
@@ -280,10 +266,9 @@ When you push from a file other than `reminders.org`, that file is
 registered in `org-apple-reminders-extra-files` so future syncs keep it up
 to date. `C-c r m` is a convenience alias for `C-c r p`.
 
-If you want `C-c r R` to create future new plain TODOs from that same file
-without prompting, add the file to `org-apple-reminders-file-list-map`.
-Otherwise, full sync will update linked headings in that file but will not
-guess that unrelated plain TODOs should become Apple reminders.
+For future `C-c r R` auto-creation from that same file, put TODOs under a
+top-level list heading such as `* Work`; TODOs outside a list section use the
+configured/default Apple Reminders list.
 
 If a whole Apple Reminders list is deleted outside Emacs, the next full sync
 marks the matching top-level section in `reminders.org` as `DONE`. That `DONE`
