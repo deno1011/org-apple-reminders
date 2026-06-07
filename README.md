@@ -119,22 +119,24 @@ Full sync chooses the list for a new unlinked `TODO` / `NEXT` / `WAITING`
 heading in this order:
 
 1. Existing `REMINDER_LIST` property on the heading.
-2. The nearest top-level list section in any known reminder org file, for
+2. The nearest top-level list section in the sync file or a file listed in
+   `org-apple-reminders-extra-files`, for
    example a heading under `* Work` goes to the Apple list `Work`.
 3. `org-apple-reminders-sync-list` / the default Apple list, only when no more
    specific context exists.
 
-That last fallback means a known org file with plain TODOs but no list section,
-and no `REMINDER_LIST`, will create those reminders in the configured/default
-Apple Reminders list during full sync. Use `REMINDER_NOSYNC: t` on headings
-that should stay local only.
+That last fallback applies only in the sync file and
+`org-apple-reminders-extra-files`. Agenda files are still scanned for existing
+linked reminders, but their unrelated plain TODOs do not create Apple reminders
+or lists unless the heading has an explicit `REMINDER_LIST`. Use
+`REMINDER_NOSYNC: t` on headings that should stay local only.
 
-In every known reminder org file, plain top-level headings are list sections
-and are created in Apple even when they have no child tasks. A top-level TODO
-with child headings is also treated as a list section, so accidentally
-unindented list headings do not become duplicate reminders. A bare top-level
-TODO without children is a reminder item and falls back to the configured/default
-Apple Reminders list. That means:
+In the sync file and `org-apple-reminders-extra-files`, plain top-level
+headings are list sections and are created in Apple even when they have no
+child tasks. A top-level TODO with child headings is also treated as a list
+section, so accidentally unindented list headings do not become duplicate
+reminders. A bare top-level TODO without children is a reminder item and falls
+back to the configured/default Apple Reminders list. That means:
 
 ```org
 * Work
