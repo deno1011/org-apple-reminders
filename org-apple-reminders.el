@@ -157,10 +157,30 @@ These files may contain REMINDER_ID headings alongside arbitrary content
 \(Babel blocks, LaTeX, prose, etc.).  Together with `org-agenda-files'
 they form the full search space for existing reminder links.
 
-New Apple items that are not linked in any known file land in
-`org-apple-reminders-sync-file' only — other files are never extended
-with new headings by this package."
+New Apple items that are not linked in any known file are pulled into
+`org-apple-reminders-sync-file' only.  Extra files are not extended with
+new headings by Apple -> org pulls; they can still create new Apple
+reminders during full sync when `org-apple-reminders-file-list-map'
+provides an explicit target list."
   :type '(repeat file)
+  :group 'org-apple-reminders)
+
+(defcustom org-apple-reminders-file-list-map nil
+  "Mapping from org file path regexps to Apple Reminders list names.
+Each entry is (FILE-REGEXP . LIST-NAME).  When full sync sees a new,
+unlinked TODO/NEXT/WAITING heading in a known non-sync file, it creates
+the Apple reminder only if the heading has an explicit REMINDER_LIST or
+the current file matches this map.
+
+This keeps agenda-wide sync conservative while supporting workflows such
+as mapping project files to Apple lists:
+
+  (setq org-apple-reminders-file-list-map
+        \\='((\"/work/tasks\\\\.org\\\\='\" . \"Work\")
+            (\"/personal/home\\\\.org\\\\='\" . \"Home\")
+            (\"/shopping\\\\.org\\\\='\" . \"Shopping\")))"
+  :type '(repeat (cons (regexp :tag "File regexp")
+                       (string :tag "Apple list")))
   :group 'org-apple-reminders)
 
 (defcustom org-apple-reminders-keymap-prefix "C-c r"
@@ -1351,6 +1371,52 @@ included.  Return the number of sections removed."
        (string= (expand-file-name (buffer-file-name))
                 (expand-file-name org-apple-reminders-sync-file))))
 
+(defun org-apple-reminders--clean-list-heading (heading)
+  "Return Apple list name represented by level-1 HEADING."
+  (string-trim
+   (replace-regexp-in-string
+    "\\[[0-9]*/[0-9]*\\][ \t]*$" ""
+    heading)))
+
+(defun org-apple-reminders--sync-file-list-at-point ()
+  "Return nearest level-1 list name at point in the sync file, or nil."
+  (when (org-apple-reminders--in-sync-file-p)
+    (save-excursion
+      (ignore-errors
+        (org-back-to-heading t)
+        (while (> (or (org-current-level) 1) 1)
+          (org-up-heading-safe))
+        (when (= (or (org-current-level) 0) 1)
+          (let ((name (org-apple-reminders--clean-list-heading
+                       (org-get-heading t t t t))))
+            (unless (string-empty-p name)
+              name)))))))
+
+(defun org-apple-reminders--file-mapped-list ()
+  "Return Apple list mapped to the current buffer's file, or nil."
+  (when (buffer-file-name)
+    (let ((file (expand-file-name (buffer-file-name))))
+      (catch 'match
+        (dolist (entry org-apple-reminders-file-list-map)
+          (when (and (consp entry)
+                     (stringp (car entry))
+                     (stringp (cdr entry))
+                     (string-match-p (car entry) file))
+            (throw 'match (cdr entry))))))))
+
+(defun org-apple-reminders--target-list-at-point (&optional default-list)
+  "Return the Apple list for creating/updating the heading at point.
+Precedence: explicit REMINDER_LIST property, nearest level-1 list section
+in `org-apple-reminders-sync-file', `org-apple-reminders-file-list-map',
+then DEFAULT-LIST."
+  (let ((target (or (org-entry-get nil "REMINDER_LIST")
+                    (org-apple-reminders--sync-file-list-at-point)
+                    (org-apple-reminders--file-mapped-list)
+                    default-list)))
+    (and (stringp target)
+         (not (string-empty-p target))
+         target)))
+
 (defun org-apple-reminders--relocate-subtree-to-list (list-name)
   "Relocate the heading subtree at point under LIST-NAME's `* ' heading.
 Used inside `org-apple-reminders-sync-file' when a reminder moves to a
@@ -1369,24 +1435,21 @@ cookies on the affected list headings."
 (defun org-apple-reminders--push-to-apple ()
   "Push changed org entries to Apple.  New items get REMINDER_ID stamped back.
 Auto-creation from unlinked headings only happens in the value of
-`org-apple-reminders-sync-file';
+`org-apple-reminders-sync-file' list sections, explicit REMINDER_LIST
+properties, or files matched by `org-apple-reminders-file-list-map';
 other linked files only push updates to already-stamped headings."
   (let* ((n-new 0) (n-updated 0)
-         (is-sync-file
-          (and (buffer-file-name)
-               (string= (expand-file-name (buffer-file-name))
-                        (expand-file-name org-apple-reminders-sync-file))))
          new-pts)
     (org-map-entries
      (lambda ()
        (let* ((id     (org-entry-get nil "REMINDER_ID"))
-              (rlist  (org-entry-get nil "REMINDER_LIST"))
+              (rlist  (org-apple-reminders--target-list-at-point))
               (state  (org-get-todo-state))
               (cached (and id (org-apple-reminders--find-in-cache id))))
          (cond
           ((org-entry-get nil "REMINDER_DELETE")
            nil)
-          ((and (null id) is-sync-file (member state '("TODO" "NEXT" "WAITING"))
+          ((and (null id) rlist (member state '("TODO" "NEXT" "WAITING"))
                 (not (org-entry-get nil "REMINDER_NOSYNC")))
            (push (point-marker) new-pts))
           ((and id rlist (member state '("DONE" "CANCELLED")))
@@ -1424,14 +1487,20 @@ other linked files only push updates to already-stamped headings."
     ;; Create new items (sync — need the Apple ID back to stamp REMINDER_ID).
     ;; Defer --default-list lookup until we know there are new items.
     (when new-pts
-      (let ((list-name (or org-apple-reminders-sync-list (org-apple-reminders--default-list))))
+      (let ((default-list (or org-apple-reminders-sync-list
+                              (org-apple-reminders--default-list))))
         (dolist (m (nreverse new-pts))
           (goto-char m)
-          (when-let (new-id (org-apple-reminders--create-in-apple
-                             list-name (org-apple-reminders--org-item-values)))
-            (org-set-property "REMINDER_ID"   new-id)
-            (org-set-property "REMINDER_LIST" list-name)
-            (setq n-new (1+ n-new))))))
+          (let ((list-name (org-apple-reminders--target-list-at-point default-list)))
+            (when (and list-name (not (org-apple-reminders--list-included-p list-name)))
+              (setq list-name nil))
+            (when list-name
+              (when (org-apple-reminders--ensure-list list-name)
+                (when-let (new-id (org-apple-reminders--create-in-apple
+                                   list-name (org-apple-reminders--org-item-values)))
+                  (org-set-property "REMINDER_ID"   new-id)
+                  (org-set-property "REMINDER_LIST" list-name)
+                  (setq n-new (1+ n-new)))))))))
     (when (or (> n-new 0) (> n-updated 0))
       (message "Reminders push: %d new, %d updated." n-new n-updated))))
 
@@ -1468,7 +1537,12 @@ Known files: `org-apple-reminders-sync-file', `org-apple-reminders-extra-files',
 and .org files in `org-agenda-files'.
 
 Conflict resolution per linked heading (3-way):
-- No REMINDER_ID (only in sync-file) → create in Apple, stamp ID back.
+- No REMINDER_ID and target list is known → create in Apple, stamp ID back.
+  Target list precedence is: explicit REMINDER_LIST, nearest top-level list
+  heading in the sync file, file regexp in `org-apple-reminders-file-list-map',
+  then the configured/default list.
+- No REMINDER_ID and no target list → leave the heading alone.  Use
+  `C-c r p' for one-off reminders from arbitrary org files.
 - Apple modDate newer (apple-changed) → Apple wins: pull all fields,
   including nils — clearing org's DEADLINE/notes when Apple's are nil.
 - REMINDER_ORG_MOD > REMINDER_APPLE_MOD (org-changed) → org wins: push
@@ -1525,10 +1599,10 @@ Apple's post-push state."
                   (org-map-entries
                    (lambda ()
                      (let* ((id    (org-entry-get nil "REMINDER_ID"))
-                            (rlist (or (org-entry-get nil "REMINDER_LIST") default-list))
+                            (rlist (org-apple-reminders--target-list-at-point default-list))
                             (state (org-get-todo-state)))
                        (cond
-                        ((and (null id) is-sync-file (member state '("TODO" "NEXT" "WAITING"))
+                        ((and (null id) rlist (member state '("TODO" "NEXT" "WAITING"))
                               (not (org-entry-get nil "REMINDER_NOSYNC")))
                          (push (point-marker) new-pts))
                         (id
@@ -1688,17 +1762,19 @@ Apple's post-push state."
                     (goto-char m) (push (point-marker) changed-positions)
                     (org-todo "DONE") (set-marker m nil)
                     (setq n-done (1+ n-done)))
-                  (when is-sync-file
-                    (dolist (m (nreverse new-pts))
-                      (goto-char m) (push (point-marker) changed-positions)
-                      (let* ((rlist  (or (org-entry-get nil "REMINDER_LIST") default-list))
-                             (new-id (org-apple-reminders--create-in-apple
-                                      rlist (org-apple-reminders--org-item-values))))
-                        (when new-id
-                          (org-set-property "REMINDER_ID"   new-id)
-                          (org-set-property "REMINDER_LIST" rlist)
-                          (puthash new-id sync-file id-index)
-                          (setq n-pushed (1+ n-pushed))))))
+                  (dolist (m (nreverse new-pts))
+                    (goto-char m) (push (point-marker) changed-positions)
+                    (let ((rlist (org-apple-reminders--target-list-at-point default-list)))
+                      (when (and rlist
+                                 (org-apple-reminders--list-included-p rlist)
+                                 (org-apple-reminders--ensure-list rlist))
+                        (let ((new-id (org-apple-reminders--create-in-apple
+                                       rlist (org-apple-reminders--org-item-values))))
+                          (when new-id
+                            (org-set-property "REMINDER_ID"   new-id)
+                            (org-set-property "REMINDER_LIST" rlist)
+                            (puthash new-id (or (buffer-file-name) sync-file) id-index)
+                            (setq n-pushed (1+ n-pushed)))))))
                   (dolist (upd (nreverse apple-updates))
                     (cl-destructuring-bind
                         (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod
