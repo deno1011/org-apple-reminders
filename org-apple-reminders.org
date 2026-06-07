@@ -1712,13 +1712,63 @@ included.  Return the number of sections removed."
   "Return non-nil when point is at a completed list-section heading."
   (member (org-get-todo-state) '("DONE" "CANCELLED")))
 
+(defun org-apple-reminders--heading-line-level ()
+  "Return heading level at beginning of current line, or nil."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at "\\(\\*+\\)\\(?:[ \t]+\\|$\\)")
+      (length (match-string 1)))))
+
+(defun org-apple-reminders--goto-current-heading-line ()
+  "Move to the current heading line without using Org element parsing."
+  (or (org-apple-reminders--heading-line-level)
+      (re-search-backward "^\\*+\\(?:[ \t]+\\|$\\)" nil t)))
+
+(defun org-apple-reminders--heading-line-title ()
+  "Return current heading title without TODO keyword, priority, tags, or cookies."
+  (save-excursion
+    (beginning-of-line)
+    (let* ((line (buffer-substring-no-properties
+                  (line-beginning-position) (line-end-position)))
+           (text (replace-regexp-in-string
+                  "^\\*+[ \t]*" "" line))
+           (todos (and (boundp 'org-todo-keywords-1)
+                       org-todo-keywords-1)))
+      (when todos
+        (setq text
+              (replace-regexp-in-string
+               (format "^\\(?:%s\\)[ \t]+"
+                       (regexp-opt todos))
+               "" text)))
+      (setq text (replace-regexp-in-string
+                  "^#\\[[A-Z]\\][ \t]*" "" text))
+      (setq text (replace-regexp-in-string
+                  "[ \t]+:[[:alnum:]_@#%:]+:[ \t]*$" "" text))
+      (org-apple-reminders--clean-list-heading text))))
+
+(defun org-apple-reminders--heading-line-todo-state ()
+  "Return TODO keyword at beginning of current heading line, or nil."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at "\\*+[ \t]+\\([^ \t\n]+\\)")
+      (let ((word (match-string 1)))
+        (and (boundp 'org-todo-keywords-1)
+             (member word org-todo-keywords-1)
+             word)))))
+
 (defun org-apple-reminders--level-1-heading-has-children-p ()
   "Return non-nil when the current level-1 heading has child headings."
   (save-excursion
-    (let ((level (org-current-level)))
-      (outline-next-heading)
-      (and (not (eobp))
-           (> (or (org-current-level) 0) level)))))
+    (forward-line 1)
+    (catch 'child
+      (while (not (eobp))
+        (cond
+         ((looking-at "^\\*\\(?:[ \t]+\\|$\\)")
+          (throw 'child nil))
+         ((looking-at "^\\*\\{2,\\}\\(?:[ \t]+\\|$\\)")
+          (throw 'child t)))
+        (forward-line 1))
+      nil)))
 
 (defun org-apple-reminders--known-file-list-section-p (&optional include-done)
   "Return non-nil when point is at a list section in a known file.
@@ -1727,13 +1777,13 @@ headings become list sections only when they have child headings; a bare
 top-level TODO is a reminder item and can fall back to the default list.
 When INCLUDE-DONE is non-nil, completed list sections are also matched."
   (and (org-apple-reminders--in-known-file-p)
-       (= (or (org-current-level) 0) 1)
-       (let ((name (org-apple-reminders--clean-list-heading
-                    (org-get-heading t t t t))))
+       (= (or (org-apple-reminders--heading-line-level) 0) 1)
+       (let ((name (org-apple-reminders--heading-line-title))
+             (todo (org-apple-reminders--heading-line-todo-state)))
          (and (not (string-empty-p name))
               (or include-done
-                  (not (org-apple-reminders--done-list-heading-p)))
-              (or (null (org-get-todo-state))
+                  (not (member todo '("DONE" "CANCELLED"))))
+              (or (null todo)
                   (org-apple-reminders--level-1-heading-has-children-p))))))
 
 (defun org-apple-reminders--done-list-section-exists-p (list-name)
@@ -1777,24 +1827,23 @@ When INCLUDE-DONE is non-nil, completed list sections are also matched."
   (when (org-apple-reminders--in-known-file-p)
     (save-excursion
       (ignore-errors
-        (org-back-to-heading t)
-        (while (> (or (org-current-level) 1) 1)
-          (org-up-heading-safe))
+        (org-apple-reminders--goto-current-heading-line)
+        (unless (= (or (org-apple-reminders--heading-line-level) 0) 1)
+          (re-search-backward "^\\*\\(?:[ \t]+\\|$\\)" nil t))
         (when (org-apple-reminders--known-file-list-section-p)
-          (let ((name (org-apple-reminders--clean-list-heading
-                       (org-get-heading t t t t))))
-            name))))))
+          (org-apple-reminders--heading-line-title))))))
 
 (defun org-apple-reminders--in-done-known-file-list-p ()
   "Return non-nil when point is inside a DONE known-file list section."
   (when (org-apple-reminders--in-known-file-p)
     (save-excursion
       (ignore-errors
-        (org-back-to-heading t)
-        (while (> (or (org-current-level) 1) 1)
-          (org-up-heading-safe))
+        (org-apple-reminders--goto-current-heading-line)
+        (unless (= (or (org-apple-reminders--heading-line-level) 0) 1)
+          (re-search-backward "^\\*\\(?:[ \t]+\\|$\\)" nil t))
         (and (org-apple-reminders--known-file-list-section-p t)
-             (org-apple-reminders--done-list-heading-p))))))
+             (member (org-apple-reminders--heading-line-todo-state)
+                     '("DONE" "CANCELLED")))))))
 
 (defun org-apple-reminders--known-file-list-heading-p ()
   "Return non-nil when point is at a level-1 list heading in a known file."
