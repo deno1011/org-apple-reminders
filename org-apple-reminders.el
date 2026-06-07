@@ -215,7 +215,10 @@ Always true when the effective included-lists value is nil."
 
 ;;; Multi-file helpers
 
-(defun org-apple-reminders--known-files ()
+(defvar org-apple-reminders--known-files-cache :unset
+  "Dynamically bound cache for `org-apple-reminders--known-files'.")
+
+(defun org-apple-reminders--compute-known-files ()
   "Deduped list of all org files that may contain REMINDER_ID headings.
 Includes `org-apple-reminders-sync-file', `org-apple-reminders-extra-files',
 .org files from `org-agenda-files', and any currently open org buffer that
@@ -236,6 +239,19 @@ already contains at least one REMINDER_ID (so files linked via
                                           (org-apple-reminders--buffer-has-reminders-p)
                                           (buffer-file-name))))
                                  (buffer-list)))))))
+
+(defun org-apple-reminders--known-files ()
+  "Return cached known files when available, otherwise compute them."
+  (if (eq org-apple-reminders--known-files-cache :unset)
+      (org-apple-reminders--compute-known-files)
+    org-apple-reminders--known-files-cache))
+
+(defmacro org-apple-reminders--with-known-files-cache (&rest body)
+  "Run BODY with `org-apple-reminders--known-files' computed once."
+  (declare (indent 0) (debug t))
+  `(let ((org-apple-reminders--known-files-cache
+          (org-apple-reminders--compute-known-files)))
+     ,@body))
 
 (defun org-apple-reminders--build-id-index ()
   "Scan all known org files; return hash REMINDER_ID → expanded file path."
@@ -1548,74 +1564,75 @@ cookies on the affected list headings."
 Auto-creation from unlinked headings only happens in the value of
 known reminder file list sections, explicit REMINDER_LIST properties,
 or the configured/default Apple list."
-  (when (org-apple-reminders--in-known-file-p)
-    (org-apple-reminders--ensure-known-file-lists))
-  (let* ((n-new 0) (n-updated 0)
-         new-pts)
-    (org-map-entries
-     (lambda ()
-       (let* ((id     (org-entry-get nil "REMINDER_ID"))
-              (rlist  (org-apple-reminders--target-list-at-point))
-              (state  (org-get-todo-state))
-              (cached (and id (org-apple-reminders--find-in-cache id))))
-         (cond
-          ((org-entry-get nil "REMINDER_DELETE")
-           nil)
-          ((and (null id) rlist (member state '("TODO" "NEXT" "WAITING"))
-                (not (org-apple-reminders--known-file-list-heading-p))
-                (not (org-entry-get nil "REMINDER_NOSYNC")))
-           (push (point-marker) new-pts))
-          ((and id rlist (member state '("DONE" "CANCELLED")))
-           (when (and cached (not (eq (alist-get 'completed cached) t)))
-             (org-apple-reminders--complete-in-apple rlist id)))
-          ((and id rlist (member state '("TODO" "NEXT" "WAITING")))
-           (let* ((vals (org-apple-reminders--org-item-values))
-                  (needs-push
-                   (or (null cached)
-                       (not (equal (or (alist-get 'title   vals) "")
-                                   (or (alist-get 'title   cached) "")))
-                       (not (equal (or (alist-get 'notes   vals) "")
-                                   (or (alist-get 'notes   cached) "")))
-                       (not (= (or (alist-get 'priority vals) 0)
-                               (or (alist-get 'priority cached) 0)))
-                       (not (equal (alist-get 'due vals)
-                                   (let ((d (alist-get 'due cached)))
-                                     (and (stringp d) (not (string-empty-p d)) d))))
-                       (not (eq (alist-get 'flagged vals)
-                                (eq (alist-get 'flagged cached) t))))))
-             (when needs-push
-               ;; Async update — capture position for the callback to stamp REMINDER_ORG_MOD
-               (let ((m (point-marker)))
-                 (org-apple-reminders--update-in-apple
-                  rlist id vals
-                  (lambda (new-mod)
-                    (when (and (stringp new-mod) (marker-buffer m))
-                      (with-current-buffer (marker-buffer m)
-                        (save-excursion
-                          (goto-char m)
-                          (org-set-property "REMINDER_ORG_MOD" new-mod))))
-                    (set-marker m nil))))
-               (setq n-updated (1+ n-updated))))))))
-     nil nil)
-    ;; Create new items (sync — need the Apple ID back to stamp REMINDER_ID).
-    ;; Defer --default-list lookup until we know there are new items.
-    (when new-pts
-      (let ((default-list (or org-apple-reminders-sync-list
-                              (org-apple-reminders--default-list))))
-        (dolist (m (nreverse new-pts))
-          (goto-char m)
-          (let ((list-name (org-apple-reminders--target-list-at-point default-list)))
-            (when (and list-name (not (org-apple-reminders--list-included-p list-name)))
-              (setq list-name nil))
-            (when list-name
-              (when (org-apple-reminders--ensure-list list-name)
-                (when-let (new-id (org-apple-reminders--create-in-apple
-                                   list-name (org-apple-reminders--org-item-values)))
-                  (org-set-property "REMINDER_ID"   new-id)
-                  (org-set-property "REMINDER_LIST" list-name)
-                  (setq n-new (1+ n-new)))))))))
-    (when (or (> n-new 0) (> n-updated 0))
-      (message "Reminders push: %d new, %d updated." n-new n-updated))))
+  (org-apple-reminders--with-known-files-cache
+    (when (org-apple-reminders--in-known-file-p)
+      (org-apple-reminders--ensure-known-file-lists))
+    (let* ((n-new 0) (n-updated 0)
+           new-pts)
+      (org-map-entries
+       (lambda ()
+         (let* ((id     (org-entry-get nil "REMINDER_ID"))
+                (rlist  (org-apple-reminders--target-list-at-point))
+                (state  (org-get-todo-state))
+                (cached (and id (org-apple-reminders--find-in-cache id))))
+           (cond
+            ((org-entry-get nil "REMINDER_DELETE")
+             nil)
+            ((and (null id) rlist (member state '("TODO" "NEXT" "WAITING"))
+                  (not (org-apple-reminders--known-file-list-heading-p))
+                  (not (org-entry-get nil "REMINDER_NOSYNC")))
+             (push (point-marker) new-pts))
+            ((and id rlist (member state '("DONE" "CANCELLED")))
+             (when (and cached (not (eq (alist-get 'completed cached) t)))
+               (org-apple-reminders--complete-in-apple rlist id)))
+            ((and id rlist (member state '("TODO" "NEXT" "WAITING")))
+             (let* ((vals (org-apple-reminders--org-item-values))
+                    (needs-push
+                     (or (null cached)
+                         (not (equal (or (alist-get 'title   vals) "")
+                                     (or (alist-get 'title   cached) "")))
+                         (not (equal (or (alist-get 'notes   vals) "")
+                                     (or (alist-get 'notes   cached) "")))
+                         (not (= (or (alist-get 'priority vals) 0)
+                                 (or (alist-get 'priority cached) 0)))
+                         (not (equal (alist-get 'due vals)
+                                     (let ((d (alist-get 'due cached)))
+                                       (and (stringp d) (not (string-empty-p d)) d))))
+                         (not (eq (alist-get 'flagged vals)
+                                  (eq (alist-get 'flagged cached) t))))))
+               (when needs-push
+                 ;; Async update — capture position for the callback to stamp REMINDER_ORG_MOD
+                 (let ((m (point-marker)))
+                   (org-apple-reminders--update-in-apple
+                    rlist id vals
+                    (lambda (new-mod)
+                      (when (and (stringp new-mod) (marker-buffer m))
+                        (with-current-buffer (marker-buffer m)
+                          (save-excursion
+                            (goto-char m)
+                            (org-set-property "REMINDER_ORG_MOD" new-mod))))
+                      (set-marker m nil))))
+                 (setq n-updated (1+ n-updated))))))))
+       nil nil)
+      ;; Create new items (sync — need the Apple ID back to stamp REMINDER_ID).
+      ;; Defer --default-list lookup until we know there are new items.
+      (when new-pts
+        (let ((default-list (or org-apple-reminders-sync-list
+                                (org-apple-reminders--default-list))))
+          (dolist (m (nreverse new-pts))
+            (goto-char m)
+            (let ((list-name (org-apple-reminders--target-list-at-point default-list)))
+              (when (and list-name (not (org-apple-reminders--list-included-p list-name)))
+                (setq list-name nil))
+              (when list-name
+                (when (org-apple-reminders--ensure-list list-name)
+                  (when-let (new-id (org-apple-reminders--create-in-apple
+                                     list-name (org-apple-reminders--org-item-values)))
+                    (org-set-property "REMINDER_ID"   new-id)
+                    (org-set-property "REMINDER_LIST" list-name)
+                    (setq n-new (1+ n-new)))))))))
+      (when (or (> n-new 0) (> n-updated 0))
+        (message "Reminders push: %d new, %d updated." n-new n-updated)))))
 
 ;;; Full bidirectional sync
 
@@ -1681,41 +1698,42 @@ in-flight JXA processes to drain so the conflict resolution sees
 Apple's post-push state."
   (interactive)
   (message "Reminders: syncing…")
-  ;; Push any unsaved org edits first, then let async pushes drain so the
-  ;; Apple fetch below sees the post-push state and the org-changed signal
-  ;; (REMINDER_ORG_MOD > REMINDER_APPLE_MOD) is reliable.
-  (org-apple-reminders--autosave-known-buffers)
-  (org-apple-reminders--wait-for-async-jxa)
-  (let* ((default-list (org-apple-reminders--default-list))
-         (sync-file    (expand-file-name org-apple-reminders-sync-file))
-         (previous-list-names
-          (mapcar (lambda (entry) (alist-get 'list entry))
-                  org-apple-reminders--cache))
-         (raw          (progn
-                         (unless (file-exists-p sync-file)
-                           (with-temp-file sync-file
-                             (insert "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n")))
-                         (org-apple-reminders--jxa-run org-apple-reminders--fetch-script)))
-         (data         (condition-case nil
-                           (json-parse-string raw :object-type 'alist :array-type 'list)
-                         (error (user-error "Reminders sync: fetch failed — %s" raw))))
-         (apple-list-names
-          (mapcar (lambda (entry) (alist-get 'list entry)) data))
-         (apple-list-ids
-          (delq nil (mapcar (lambda (entry)
-                               (org-apple-reminders--list-info-id entry))
-                             data)))
-         (apple-by-id  (let ((ht (make-hash-table :test #'equal)))
-                         (dolist (entry data)
-                           (dolist (item (alist-get 'items entry))
-                             (puthash (alist-get 'id item) item ht)))
-                         ht))
-         (id-index     (org-apple-reminders--build-id-index))
-         (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
-         (n-deleted 0)
-         (n-lists-done 0)
-         (n-pruned 0))
-    (setq org-apple-reminders--cache data)
+  (org-apple-reminders--with-known-files-cache
+    ;; Push any unsaved org edits first, then let async pushes drain so the
+    ;; Apple fetch below sees the post-push state and the org-changed signal
+    ;; (REMINDER_ORG_MOD > REMINDER_APPLE_MOD) is reliable.
+    (org-apple-reminders--autosave-known-buffers)
+    (org-apple-reminders--wait-for-async-jxa)
+    (let* ((default-list (org-apple-reminders--default-list))
+           (sync-file    (expand-file-name org-apple-reminders-sync-file))
+           (previous-list-names
+            (mapcar (lambda (entry) (alist-get 'list entry))
+                    org-apple-reminders--cache))
+           (raw          (progn
+                           (unless (file-exists-p sync-file)
+                             (with-temp-file sync-file
+                               (insert "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n")))
+                           (org-apple-reminders--jxa-run org-apple-reminders--fetch-script)))
+           (data         (condition-case nil
+                             (json-parse-string raw :object-type 'alist :array-type 'list)
+                           (error (user-error "Reminders sync: fetch failed — %s" raw))))
+           (apple-list-names
+            (mapcar (lambda (entry) (alist-get 'list entry)) data))
+           (apple-list-ids
+            (delq nil (mapcar (lambda (entry)
+                                 (org-apple-reminders--list-info-id entry))
+                               data)))
+           (apple-by-id  (let ((ht (make-hash-table :test #'equal)))
+                           (dolist (entry data)
+                             (dolist (item (alist-get 'items entry))
+                               (puthash (alist-get 'id item) item ht)))
+                           ht))
+           (id-index     (org-apple-reminders--build-id-index))
+           (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
+           (n-deleted 0)
+           (n-lists-done 0)
+           (n-pruned 0))
+      (setq org-apple-reminders--cache data)
     (when (file-exists-p sync-file)
       (with-current-buffer (find-file-noselect sync-file)
         (org-save-outline-visibility t
@@ -2009,8 +2027,8 @@ Apple's post-push state."
               (dolist (m (nreverse changed-positions))
                 (when (marker-position m)
                   (goto-char m) (org-reveal) (set-marker m nil)))))))
-    (message "Reminders: %d deleted  %d←DONE  %d lists→DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated  %d pruned"
-             n-deleted n-done n-lists-done n-reopened n-pushed n-pulled n-updated n-pruned))))
+      (message "Reminders: %d deleted  %d←DONE  %d lists→DONE  %d↑reopened  %d→Apple  %d←Apple  %d updated  %d pruned"
+               n-deleted n-done n-lists-done n-reopened n-pushed n-pulled n-updated n-pruned)))))
 
 ;;; Background pull (Apple → org, async)
 
@@ -2021,26 +2039,27 @@ Apple's post-push state."
      org-apple-reminders--fetch-script
      (lambda (raw)
        (condition-case nil
-           (let* ((previous-list-names
-                   (mapcar (lambda (entry) (alist-get 'list entry))
-                           org-apple-reminders--cache))
-                  (data         (json-parse-string raw :object-type 'alist :array-type 'list))
-                  (apple-list-names
-                   (mapcar (lambda (entry) (alist-get 'list entry)) data))
-                  (apple-list-ids
-                   (delq nil (mapcar (lambda (entry)
-                                        (org-apple-reminders--list-info-id entry))
-                                      data)))
-                  (sync-file    (expand-file-name org-apple-reminders-sync-file))
-                  (apple-by-id  (let ((ht (make-hash-table :test #'equal)))
-                                  (dolist (entry data)
-                                    (dolist (item (alist-get 'items entry))
-                                      (puthash (alist-get 'id item) item ht)))
-                                  ht))
-                  (id-index     (org-apple-reminders--build-id-index)))
-             (setq org-apple-reminders--cache data)
-             (org-apple-reminders--write-agenda-file data)
-             (let ((org-apple-reminders--syncing t))
+           (org-apple-reminders--with-known-files-cache
+             (let* ((previous-list-names
+                     (mapcar (lambda (entry) (alist-get 'list entry))
+                             org-apple-reminders--cache))
+                    (data         (json-parse-string raw :object-type 'alist :array-type 'list))
+                    (apple-list-names
+                     (mapcar (lambda (entry) (alist-get 'list entry)) data))
+                    (apple-list-ids
+                     (delq nil (mapcar (lambda (entry)
+                                          (org-apple-reminders--list-info-id entry))
+                                        data)))
+                    (sync-file    (expand-file-name org-apple-reminders-sync-file))
+                    (apple-by-id  (let ((ht (make-hash-table :test #'equal)))
+                                    (dolist (entry data)
+                                      (dolist (item (alist-get 'items entry))
+                                        (puthash (alist-get 'id item) item ht)))
+                                    ht))
+                    (id-index     (org-apple-reminders--build-id-index)))
+               (setq org-apple-reminders--cache data)
+               (org-apple-reminders--write-agenda-file data)
+               (let ((org-apple-reminders--syncing t))
                ;; Phase 1: update existing linked items across all known files
                (dolist (file (org-apple-reminders--known-files))
                  (when (file-exists-p file)
@@ -2182,7 +2201,7 @@ Apple's post-push state."
                                (with-current-buffer buf
                                  (when (derived-mode-p 'org-agenda-mode)
                                    (let ((inhibit-message t))
-                                     (ignore-errors (org-agenda-redo)))))))))))))))
+                                     (ignore-errors (org-agenda-redo))))))))))))))))
          (error nil))))))
 
 ;;; Timer
