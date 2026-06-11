@@ -733,6 +733,194 @@ JSON.stringify({ok:true,list:name,listId:lid});"
 
 ;;; Conflict resolution helpers
 
+(defun org-apple-reminders--nonempty-string (value)
+  "Return VALUE when it is a non-empty string, otherwise nil."
+  (and (stringp value) (not (string-empty-p value)) value))
+
+(defun org-apple-reminders--todo-open-p (state)
+  "Return non-nil when TODO STATE is an active reminder state."
+  (member state '("TODO" "NEXT" "WAITING")))
+
+(defun org-apple-reminders--todo-done-p (state)
+  "Return non-nil when TODO STATE is a terminal reminder state."
+  (member state '("DONE" "CANCELLED")))
+
+(defun org-apple-reminders--apple-item-mod-date (item)
+  "Return ITEM's Apple modification date, or nil when missing."
+  (org-apple-reminders--nonempty-string (alist-get 'modDate item)))
+
+(defun org-apple-reminders--apple-item-due (item)
+  "Return ITEM's Apple due value, or nil when missing."
+  (org-apple-reminders--nonempty-string (alist-get 'due item)))
+
+(defun org-apple-reminders--apple-item-completed-p (item)
+  "Return non-nil when Apple ITEM is completed."
+  (eq (alist-get 'completed item) t))
+
+(defun org-apple-reminders--apple-list-names (data)
+  "Return Apple list names from fetched DATA."
+  (mapcar (lambda (entry) (alist-get 'list entry)) data))
+
+(defun org-apple-reminders--apple-list-ids (data)
+  "Return non-nil Apple list ids from fetched DATA."
+  (delq nil
+        (mapcar (lambda (entry)
+                  (org-apple-reminders--list-info-id entry))
+                data)))
+
+(defun org-apple-reminders--apple-items-by-id (data)
+  "Return hash table mapping reminder ids to Apple items in DATA."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (entry data)
+      (dolist (item (alist-get 'items entry))
+        (puthash (alist-get 'id item) item table)))
+    table))
+
+(defun org-apple-reminders--org-priority-value ()
+  "Return the Apple priority value represented by the org heading at point."
+  (pcase (nth 3 (org-heading-components))
+    (?A 1)
+    (?B 5)
+    (?C 9)
+    (_ 0)))
+
+(defun org-apple-reminders--org-deadline-value ()
+  "Return the date portion of the org DEADLINE at point, or nil."
+  (when-let ((deadline (org-entry-get nil "DEADLINE")))
+    (when (string-match "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" deadline)
+      (match-string 1 deadline))))
+
+(defun org-apple-reminders--org-title-value ()
+  "Return the reminder title represented by the org heading at point."
+  (replace-regexp-in-string "^★ " "" (org-get-heading t t t t)))
+
+(defun org-apple-reminders--org-flagged-p ()
+  "Return non-nil when the org heading at point is tagged flagged."
+  (not (null (member "flagged" (org-get-tags nil t)))))
+
+(defun org-apple-reminders--current-org-field-values ()
+  "Return tracked org field values for the heading at point."
+  `((title . ,(org-apple-reminders--org-title-value))
+    (due . ,(org-apple-reminders--org-deadline-value))
+    (priority . ,(org-apple-reminders--org-priority-value))
+    (flagged . ,(org-apple-reminders--org-flagged-p))
+    (notes . ,(org-apple-reminders--extract-notes))))
+
+(defun org-apple-reminders--apple-field-values (item)
+  "Return tracked Apple field values from ITEM."
+  `((title . ,(or (alist-get 'title item) ""))
+    (due . ,(org-apple-reminders--apple-item-due item))
+    (priority . ,(or (alist-get 'priority item) 0))
+    (flagged . ,(eq (alist-get 'flagged item) t))
+    (notes . ,(or (alist-get 'notes item) ""))
+    (mod-date . ,(org-apple-reminders--apple-item-mod-date item))))
+
+(defun org-apple-reminders--field-values-differ-p (apple-values org-values)
+  "Return non-nil when APPLE-VALUES and ORG-VALUES disagree."
+  (or (not (equal (alist-get 'title apple-values)
+                  (alist-get 'title org-values)))
+      (not (equal (alist-get 'due apple-values)
+                  (alist-get 'due org-values)))
+      (not (= (alist-get 'priority apple-values)
+              (alist-get 'priority org-values)))
+      (not (eq (alist-get 'flagged apple-values)
+               (alist-get 'flagged org-values)))
+      (not (equal (alist-get 'notes apple-values)
+                  (alist-get 'notes org-values)))))
+
+(defun org-apple-reminders--org-push-needed-p (org-values apple-values include-empty)
+  "Return non-nil when ORG-VALUES should be pushed over APPLE-VALUES.
+When INCLUDE-EMPTY is non-nil, nil and empty org values are meaningful and
+clear Apple fields.  Otherwise only non-empty org due/notes/priority values
+are allowed to overwrite Apple; title and flagged state still remain explicit."
+  (let ((org-title (or (alist-get 'title org-values) ""))
+        (org-notes (alist-get 'notes org-values))
+        (org-prio  (or (alist-get 'priority org-values) 0))
+        (org-due   (alist-get 'due org-values))
+        (org-flag  (alist-get 'flagged org-values))
+        (apple-title (or (alist-get 'title apple-values) ""))
+        (apple-notes (or (alist-get 'notes apple-values) ""))
+        (apple-prio  (or (alist-get 'priority apple-values) 0))
+        (apple-due   (alist-get 'due apple-values))
+        (apple-flag  (alist-get 'flagged apple-values)))
+    (or (not (equal org-title apple-title))
+        (if include-empty
+            (not (equal (or org-notes "") apple-notes))
+          (and org-notes
+               (not (string-empty-p org-notes))
+               (not (equal org-notes apple-notes))))
+        (if include-empty
+            (not (= org-prio apple-prio))
+          (and (> org-prio 0) (not (= org-prio apple-prio))))
+        (if include-empty
+            (not (equal org-due apple-due))
+          (and org-due (not (equal org-due apple-due))))
+        (not (eq org-flag apple-flag)))))
+
+(defun org-apple-reminders--apply-apple-field-values (apple-values)
+  "Apply APPLE-VALUES to the org heading at point."
+  (let ((apple-title (alist-get 'title apple-values))
+        (apple-prio  (alist-get 'priority apple-values))
+        (apple-due   (alist-get 'due apple-values))
+        (apple-flag  (alist-get 'flagged apple-values))
+        (apple-notes (alist-get 'notes apple-values))
+        (apple-mod   (alist-get 'mod-date apple-values))
+        (org-values  (org-apple-reminders--current-org-field-values)))
+    (unless (equal apple-title (alist-get 'title org-values))
+      (org-back-to-heading t)
+      (when (looking-at org-complex-heading-regexp)
+        (let ((beg (match-beginning 4))
+              (end (match-end 4)))
+          (when beg
+            (delete-region beg end)
+            (goto-char beg)
+            (insert apple-title)))))
+    (unless (= apple-prio (alist-get 'priority org-values))
+      (org-priority (cond ((= apple-prio 1) ?A)
+                          ((= apple-prio 5) ?B)
+                          ((= apple-prio 9) ?C)
+                          (t 'remove))))
+    (unless (equal apple-due (alist-get 'due org-values))
+      (if apple-due
+          (org-add-planning-info 'deadline
+                                 (org-apple-reminders--format-due apple-due))
+        (org-add-planning-info nil nil 'deadline)))
+    (unless (eq apple-flag (alist-get 'flagged org-values))
+      (org-toggle-tag "flagged" (if apple-flag 'on 'off)))
+    (unless (equal apple-notes (alist-get 'notes org-values))
+      (org-apple-reminders--set-org-notes apple-notes))
+    (when (stringp apple-mod)
+      (org-set-property "REMINDER_APPLE_MOD" apple-mod))))
+
+(defun org-apple-reminders--backfill-from-apple (apple-values)
+  "Backfill missing org fields from APPLE-VALUES.
+Return non-nil when the org heading was changed."
+  (let ((org-values (org-apple-reminders--org-item-values))
+        (changed nil))
+    (when (and (alist-get 'due apple-values)
+               (null (alist-get 'due org-values)))
+      (org-add-planning-info
+       'deadline
+       (org-apple-reminders--format-due (alist-get 'due apple-values)))
+      (setq changed t))
+    (when (and (org-apple-reminders--nonempty-string
+                (alist-get 'notes apple-values))
+               (string-empty-p (or (alist-get 'notes org-values) "")))
+      (org-apple-reminders--set-org-notes (alist-get 'notes apple-values))
+      (setq changed t))
+    (when (and (> (or (alist-get 'priority apple-values) 0) 0)
+               (= (or (alist-get 'priority org-values) 0) 0))
+      (org-priority (cond ((= (alist-get 'priority apple-values) 1) ?A)
+                          ((= (alist-get 'priority apple-values) 5) ?B)
+                          ((= (alist-get 'priority apple-values) 9) ?C)
+                          (t 'remove)))
+      (setq changed t))
+    (when (and (alist-get 'flagged apple-values)
+               (not (alist-get 'flagged org-values)))
+      (org-toggle-tag "flagged" 'on)
+      (setq changed t))
+    changed))
+
 (defun org-apple-reminders--find-in-cache (id)
   "Return Apple cache item with REMINDER_ID = ID, or nil."
   (catch 'found
@@ -1666,28 +1854,22 @@ or the configured/default Apple list."
            (cond
             ((org-entry-get nil "REMINDER_DELETE")
              nil)
-            ((and (null id) rlist (member state '("TODO" "NEXT" "WAITING"))
+            ((and (null id) rlist (org-apple-reminders--todo-open-p state)
                   (not (org-apple-reminders--known-file-list-heading-p))
                   (not (org-entry-get nil "REMINDER_NOSYNC")))
              (push (point-marker) new-pts))
-            ((and id rlist (member state '("DONE" "CANCELLED")))
-             (when (and cached (not (eq (alist-get 'completed cached) t)))
+            ((and id rlist (org-apple-reminders--todo-done-p state))
+             (when (and cached
+                        (not (org-apple-reminders--apple-item-completed-p cached)))
                (org-apple-reminders--complete-in-apple rlist id)))
-            ((and id rlist (member state '("TODO" "NEXT" "WAITING")))
+            ((and id rlist (org-apple-reminders--todo-open-p state))
              (let* ((vals (org-apple-reminders--org-item-values))
+                    (cached-values (and cached
+                                        (org-apple-reminders--apple-field-values cached)))
                     (needs-push
                      (or (null cached)
-                         (not (equal (or (alist-get 'title   vals) "")
-                                     (or (alist-get 'title   cached) "")))
-                         (not (equal (or (alist-get 'notes   vals) "")
-                                     (or (alist-get 'notes   cached) "")))
-                         (not (= (or (alist-get 'priority vals) 0)
-                                 (or (alist-get 'priority cached) 0)))
-                         (not (equal (alist-get 'due vals)
-                                     (let ((d (alist-get 'due cached)))
-                                       (and (stringp d) (not (string-empty-p d)) d))))
-                         (not (eq (alist-get 'flagged vals)
-                                  (eq (alist-get 'flagged cached) t))))))
+                         (org-apple-reminders--org-push-needed-p
+                          vals cached-values t))))
                (when needs-push
                  ;; Async update — capture position for the callback to stamp REMINDER_ORG_MOD
                  (let ((m (point-marker)))
@@ -1806,17 +1988,9 @@ Apple's post-push state."
            (data         (condition-case nil
                              (json-parse-string raw :object-type 'alist :array-type 'list)
                            (error (user-error "Reminders sync: fetch failed — %s" raw))))
-           (apple-list-names
-            (mapcar (lambda (entry) (alist-get 'list entry)) data))
-           (apple-list-ids
-            (delq nil (mapcar (lambda (entry)
-                                 (org-apple-reminders--list-info-id entry))
-                               data)))
-           (apple-by-id  (let ((ht (make-hash-table :test #'equal)))
-                           (dolist (entry data)
-                             (dolist (item (alist-get 'items entry))
-                               (puthash (alist-get 'id item) item ht)))
-                           ht))
+           (apple-list-names (org-apple-reminders--apple-list-names data))
+           (apple-list-ids (org-apple-reminders--apple-list-ids data))
+           (apple-by-id (org-apple-reminders--apple-items-by-id data))
            (id-index     (org-apple-reminders--build-id-index))
            (n-done 0) (n-pushed 0) (n-pulled 0) (n-updated 0) (n-reopened 0)
            (n-deleted 0)
@@ -1846,61 +2020,38 @@ Apple's post-push state."
                             (rlist (org-apple-reminders--target-list-at-point default-list))
                             (state (org-get-todo-state)))
                        (cond
-                        ((and (null id) rlist (member state '("TODO" "NEXT" "WAITING"))
+                        ((and (null id) rlist (org-apple-reminders--todo-open-p state)
                               (not (org-apple-reminders--known-file-list-heading-p))
                               (not (org-entry-get nil "REMINDER_NOSYNC")))
                          (push (point-marker) new-pts))
                         (id
                          (let ((apple (gethash id apple-by-id)))
                            (cond
-                            ((and (member state '("DONE" "CANCELLED"))
-                                  apple (not (eq (alist-get 'completed apple) t)))
-                             (let* ((a-mod (let ((m (alist-get 'modDate apple)))
-                                             (and (stringp m) (not (string-empty-p m)) m)))
+                            ((and (org-apple-reminders--todo-done-p state)
+                                  apple
+                                  (not (org-apple-reminders--apple-item-completed-p apple)))
+                             (let* ((a-mod (org-apple-reminders--apple-item-mod-date apple))
                                     (last  (org-apple-reminders--last-known-mod)))
                                (if (and a-mod (or (null last) (string> a-mod last)))
                                    (push (point-marker) reopen-pts)
                                  (org-apple-reminders--complete-in-apple rlist id))))
-                            ((and (member state '("TODO" "NEXT" "WAITING"))
-                                  (or (null apple) (eq (alist-get 'completed apple) t)))
+                            ((and (org-apple-reminders--todo-open-p state)
+                                  (or (null apple)
+                                      (org-apple-reminders--apple-item-completed-p apple)))
                              (push (point-marker) done-pts))
-                            ((member state '("TODO" "NEXT" "WAITING"))
-                             (let* ((a-mod       (let ((m (alist-get 'modDate apple)))
-                                                   (and (stringp m) (not (string-empty-p m)) m)))
+                            ((org-apple-reminders--todo-open-p state)
+                             (let* ((a-mod       (org-apple-reminders--apple-item-mod-date apple))
                                     (last-known  (org-apple-reminders--last-known-mod))
                                     (apple-changed (and a-mod
                                                         (or (null last-known)
                                                             (string> a-mod last-known)))))
                                (if apple-changed
-                                   (let* ((a-prio   (or (alist-get 'priority apple) 0))
-                                          (a-due    (let ((d (alist-get 'due apple)))
-                                                      (and (stringp d) (not (string-empty-p d)) d)))
-                                          (a-flagged (eq (alist-get 'flagged apple) t))
-                                          (a-title  (or (alist-get 'title apple) ""))
-                                          (a-notes  (or (alist-get 'notes apple) ""))
-                                          (p-char   (nth 3 (org-heading-components)))
-                                          (o-prio   (cond ((eql p-char ?A) 1)
-                                                          ((eql p-char ?B) 5)
-                                                          ((eql p-char ?C) 9)
-                                                          (t 0)))
-                                          (o-due    (let ((dl (org-entry-get nil "DEADLINE")))
-                                                      (when (and dl (string-match
-                                                                    "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" dl))
-                                                        (match-string 1 dl))))
-                                          (o-flagged (not (null (member "flagged" (org-get-tags nil t)))))
-                                          (o-title  (replace-regexp-in-string
-                                                     "^★ " "" (org-get-heading t t t t)))
-                                          (o-notes  (org-apple-reminders--extract-notes))
-                                          (changed  (or (/= a-prio o-prio)
-                                                        (not (equal a-due o-due))
-                                                        (not (eq a-flagged o-flagged))
-                                                        (not (equal a-title o-title))
-                                                        (not (equal a-notes o-notes)))))
+                                   (let* ((apple-values (org-apple-reminders--apple-field-values apple))
+                                          (org-values (org-apple-reminders--current-org-field-values))
+                                          (changed (org-apple-reminders--field-values-differ-p
+                                                    apple-values org-values)))
                                      (if changed
-                                         (push (list (point-marker) rlist
-                                                     a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                                                     a-title o-title a-notes o-notes)
-                                               apple-updates)
+                                         (push (list (point-marker) apple-values) apple-updates)
                                        ;; Apple's modDate advanced but every tracked
                                        ;; field already matches org — record that this
                                        ;; modDate is reconciled so org edits can win later.
@@ -1921,28 +2072,14 @@ Apple's post-push state."
                                         (org-mod-prop   (org-entry-get nil "REMINDER_ORG_MOD"))
                                         (org-changed   (and org-mod-prop apple-mod-prop
                                                             (string> org-mod-prop apple-mod-prop)))
-                                        (v-title (or (alist-get 'title vals) ""))
-                                        (v-notes (alist-get 'notes vals))
-                                        (v-prio  (or (alist-get 'priority vals) 0))
-                                        (v-due   (alist-get 'due vals))
-                                        (v-flag  (alist-get 'flagged vals))
-                                        (a-title (or (alist-get 'title apple) ""))
-                                        (a-notes-raw (alist-get 'notes apple))
-                                        (a-notes (and (stringp a-notes-raw) a-notes-raw))
-                                        (a-prio  (or (alist-get 'priority apple) 0))
-                                        (a-due   (let ((d (alist-get 'due apple)))
-                                                   (and (stringp d) (not (string-empty-p d)) d)))
-                                        (a-flag  (eq (alist-get 'flagged apple) t)))
+                                        (apple-values (org-apple-reminders--apple-field-values apple)))
                                    (if org-changed
                                        ;; ORG-WINS: push all diffs including
                                        ;; nils (Bug-1 fix means clearing Apple's
                                        ;; dueDate via EventKit now works).
                                        (let ((needs-push
-                                              (or (not (equal v-title a-title))
-                                                  (not (equal (or v-notes "") (or a-notes "")))
-                                                  (not (= v-prio a-prio))
-                                                  (not (equal v-due a-due))
-                                                  (not (eq v-flag a-flag)))))
+                                              (org-apple-reminders--org-push-needed-p
+                                               vals apple-values t)))
                                          (when needs-push
                                            (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
                                              (when (stringp new-mod)
@@ -1950,49 +2087,15 @@ Apple's post-push state."
                                            (setq n-updated (1+ n-updated))))
                                      ;; NEITHER NEWER: backfill missing org
                                      ;; fields, push non-nil org diffs only.
-                                     (let* ((bf-due    (and a-due (null v-due)))
-                                            (bf-notes  (and a-notes
-                                                            (not (string-empty-p a-notes))
-                                                            (string-empty-p (or v-notes ""))))
-                                            (bf-prio   (and (> a-prio 0) (= v-prio 0)))
-                                            (bf-flag   (and a-flag (not v-flag)))
-                                            (did-bf    nil))
-                                       (when bf-due
-                                         (org-add-planning-info 'deadline
-                                                                (org-apple-reminders--format-due a-due))
-                                         (setq did-bf t))
-                                       (when bf-notes
-                                         (org-apple-reminders--set-org-notes a-notes)
-                                         (setq did-bf t))
-                                       (when bf-prio
-                                         (org-priority (cond ((= a-prio 1) ?A)
-                                                             ((= a-prio 5) ?B)
-                                                             ((= a-prio 9) ?C)
-                                                             (t 'remove)))
-                                         (setq did-bf t))
-                                       (when bf-flag
-                                         (org-toggle-tag "flagged" 'on)
-                                         (setq did-bf t))
+                                     (let* ((did-bf (org-apple-reminders--backfill-from-apple apple-values)))
                                        ;; Recompute vals after backfills, then
                                        ;; check for any non-nil push needs.
                                        (let* ((vals2 (if did-bf
                                                          (org-apple-reminders--org-item-values)
                                                        vals))
-                                              (v2-title (or (alist-get 'title vals2) ""))
-                                              (v2-notes (alist-get 'notes vals2))
-                                              (v2-prio  (or (alist-get 'priority vals2) 0))
-                                              (v2-due   (alist-get 'due vals2))
-                                              (v2-flag  (alist-get 'flagged vals2))
-                                              (push-due-needed (and v2-due (not (equal v2-due a-due))))
-                                              (push-notes-needed (and v2-notes
-                                                                      (not (string-empty-p v2-notes))
-                                                                      (not (equal v2-notes (or a-notes "")))))
-                                              (push-title (not (equal v2-title a-title)))
-                                              (push-prio  (and (> v2-prio 0)
-                                                               (not (= v2-prio a-prio))))
-                                              (push-flag  (not (eq v2-flag a-flag)))
-                                              (needs-push (or push-due-needed push-notes-needed
-                                                              push-title push-prio push-flag)))
+                                              (needs-push
+                                               (org-apple-reminders--org-push-needed-p
+                                                vals2 apple-values nil)))
                                          (when needs-push
                                            (let ((new-mod (org-apple-reminders--update-in-apple
                                                            rlist id vals2)))
@@ -2021,34 +2124,9 @@ Apple's post-push state."
                             (puthash new-id (or (buffer-file-name) sync-file) id-index)
                             (setq n-pushed (1+ n-pushed)))))))
                   (dolist (upd (nreverse apple-updates))
-                    (cl-destructuring-bind
-                        (m _rlist a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                           a-title o-title a-notes o-notes)
-                        upd
+                    (cl-destructuring-bind (m apple-values) upd
                       (goto-char m) (push (point-marker) changed-positions)
-                      (unless (equal a-title o-title)
-                        (org-back-to-heading t)
-                        (when (looking-at org-complex-heading-regexp)
-                          (let ((beg (match-beginning 4))
-                                (end (match-end 4)))
-                            (when beg
-                              (delete-region beg end)
-                              (goto-char beg)
-                              (insert a-title)))))
-                      (unless (= a-prio o-prio)
-                        (org-priority (cond ((= a-prio 1) ?A)
-                                            ((= a-prio 5) ?B)
-                                            ((= a-prio 9) ?C)
-                                            (t 'remove))))
-                      (unless (equal a-due o-due)
-                        (if a-due
-                            (org-add-planning-info 'deadline (org-apple-reminders--format-due a-due))
-                          (org-add-planning-info nil nil 'deadline)))
-                      (unless (eq a-flagged o-flagged)
-                        (org-toggle-tag "flagged" (if a-flagged 'on 'off)))
-                      (unless (equal a-notes o-notes)
-                        (org-apple-reminders--set-org-notes a-notes))
-                      (when (stringp a-mod) (org-set-property "REMINDER_APPLE_MOD" a-mod))
+                      (org-apple-reminders--apply-apple-field-values apple-values)
                       (setq n-updated (1+ n-updated))
                       (set-marker m nil)))
                   (dolist (m (nreverse reopen-pts))
@@ -2094,7 +2172,7 @@ Apple's post-push state."
                   (dolist (item items)
                     (let ((id (alist-get 'id item)))
                       (when (and (not (gethash id id-index))
-                                 (not (eq (alist-get 'completed item) t)))
+                                 (not (org-apple-reminders--apple-item-completed-p item)))
                         (org-apple-reminders--goto-list-heading lname)
                         (org-apple-reminders--stamp-list-section lname entry)
                         (push (point-marker) changed-positions)
@@ -2133,18 +2211,10 @@ Apple's post-push state."
                      (mapcar (lambda (entry) (alist-get 'list entry))
                              org-apple-reminders--cache))
                     (data         (json-parse-string raw :object-type 'alist :array-type 'list))
-                    (apple-list-names
-                     (mapcar (lambda (entry) (alist-get 'list entry)) data))
-                    (apple-list-ids
-                     (delq nil (mapcar (lambda (entry)
-                                          (org-apple-reminders--list-info-id entry))
-                                        data)))
+                    (apple-list-names (org-apple-reminders--apple-list-names data))
+                    (apple-list-ids (org-apple-reminders--apple-list-ids data))
                     (sync-file    (expand-file-name org-apple-reminders-sync-file))
-                    (apple-by-id  (let ((ht (make-hash-table :test #'equal)))
-                                    (dolist (entry data)
-                                      (dolist (item (alist-get 'items entry))
-                                        (puthash (alist-get 'id item) item ht)))
-                                    ht))
+                    (apple-by-id  (org-apple-reminders--apple-items-by-id data))
                     (id-index     (org-apple-reminders--build-id-index)))
                (setq org-apple-reminders--cache data)
                (org-apple-reminders--write-agenda-file data)
@@ -2166,13 +2236,15 @@ Apple's post-push state."
                                 (when (and id
                                            (not (org-entry-get nil "REMINDER_DELETE")))
                                   (cond
-                                   ((and (member state '("TODO" "NEXT" "WAITING"))
+                                   ((and (org-apple-reminders--todo-open-p state)
                                          (let ((a (gethash id apple-by-id)))
-                                           (or (null a) (eq (alist-get 'completed a) t))))
+                                           (or (null a)
+                                               (org-apple-reminders--apple-item-completed-p a))))
                                     (push (point-marker) done-pts))
-                                   ((and (member state '("DONE" "CANCELLED"))
+                                   ((and (org-apple-reminders--todo-done-p state)
                                          (let ((a (gethash id apple-by-id)))
-                                           (and a (not (eq (alist-get 'completed a) t)))))
+                                           (and a
+                                                (not (org-apple-reminders--apple-item-completed-p a)))))
                                     (push (point-marker) reopen-pts))))))
                             nil nil)
                            (dolist (m (nreverse done-pts))
@@ -2186,75 +2258,29 @@ Apple's post-push state."
                                      (aitem  (when id (gethash id apple-by-id))))
                                 (when (and id aitem
                                            (not (org-entry-get nil "REMINDER_DELETE"))
-                                           (not (eq (alist-get 'completed aitem) t))
-                                           (member (org-get-todo-state) '("TODO" "NEXT" "WAITING")))
-                                  (let* ((a-prio    (or (alist-get 'priority aitem) 0))
-                                         (a-due     (let ((d (alist-get 'due aitem)))
-                                                      (and (stringp d) (not (string-empty-p d)) d)))
-                                         (a-flagged (eq (alist-get 'flagged aitem) t))
-                                         (a-mod     (let ((m (alist-get 'modDate aitem)))
-                                                      (and (stringp m) (not (string-empty-p m)) m)))
-                                         (p-char    (nth 3 (org-heading-components)))
-                                         (o-prio    (cond ((eql p-char ?A) 1)
-                                                          ((eql p-char ?B) 5)
-                                                          ((eql p-char ?C) 9)
-                                                          (t 0)))
-                                         (o-due     (let ((dl (org-entry-get nil "DEADLINE")))
-                                                      (when (and dl (string-match
-                                                                    "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" dl))
-                                                        (match-string 1 dl))))
-                                         (o-flagged (not (null (member "flagged" (org-get-tags nil t)))))
-                                         (a-title   (or (alist-get 'title aitem) ""))
-                                         (a-notes   (or (alist-get 'notes aitem) ""))
-                                         (o-title   (replace-regexp-in-string
-                                                     "^★ " "" (org-get-heading t t t t)))
-                                         (o-notes   (org-apple-reminders--extract-notes))
-                                         (changed   (or (/= a-prio o-prio)
-                                                        (not (equal a-due o-due))
-                                                        (not (eq a-flagged o-flagged))
-                                                        (not (equal a-title o-title))
-                                                        (not (equal a-notes o-notes))))
+                                           (not (org-apple-reminders--apple-item-completed-p aitem))
+                                           (org-apple-reminders--todo-open-p (org-get-todo-state)))
+                                  (let* ((apple-values (org-apple-reminders--apple-field-values aitem))
+                                         (org-values (org-apple-reminders--current-org-field-values))
+                                         (changed (org-apple-reminders--field-values-differ-p
+                                                   apple-values org-values))
                                          (last-known (org-apple-reminders--last-known-mod))
-                                         (apple-changed (and a-mod (or (null last-known)
-                                                                        (string> a-mod last-known)))))
+                                         (a-mod (alist-get 'mod-date apple-values))
+                                         (apple-changed (and a-mod
+                                                             (or (null last-known)
+                                                                 (string> a-mod last-known)))))
                                     (when apple-changed
                                       (if changed
-                                          (push (list (point-marker)
-                                                      a-prio o-prio a-due o-due a-flagged o-flagged a-mod
-                                                      a-title o-title a-notes o-notes)
-                                                field-updates)
+                                          (push (list (point-marker) apple-values) field-updates)
                                         ;; modDate advanced but fields already match —
                                         ;; record reconciliation so org edits can win.
                                         (when (stringp a-mod)
                                           (org-set-property "REMINDER_APPLE_MOD" a-mod))))))))
-                            nil nil)
+                           nil nil)
                            (dolist (upd (nreverse field-updates))
-                             (cl-destructuring-bind (m a-prio o-prio a-due o-due a-flagged o-flagged a-mod a-title o-title a-notes o-notes) upd
+                             (cl-destructuring-bind (m apple-values) upd
                                (goto-char m)
-                               (unless (equal a-title o-title)
-                                 (org-back-to-heading t)
-                                 (when (looking-at org-complex-heading-regexp)
-                                   (let ((beg (match-beginning 4))
-                                         (end (match-end 4)))
-                                     (when beg
-                                       (delete-region beg end)
-                                       (goto-char beg)
-                                       (insert a-title)))))
-                               (unless (= a-prio o-prio)
-                                 (org-priority (cond ((= a-prio 1) ?A)
-                                                     ((= a-prio 5) ?B)
-                                                     ((= a-prio 9) ?C)
-                                                     (t 'remove))))
-                               (unless (equal a-due o-due)
-                                 (if a-due
-                                     (org-add-planning-info 'deadline (org-apple-reminders--format-due a-due))
-                                   (org-add-planning-info nil nil 'deadline)))
-                               (unless (eq a-flagged o-flagged)
-                                 (org-toggle-tag "flagged" (if a-flagged 'on 'off)))
-                               (unless (equal a-notes o-notes)
-                                 (org-apple-reminders--set-org-notes a-notes))
-                               (when (stringp a-mod)
-                                 (org-set-property "REMINDER_APPLE_MOD" a-mod))
+                               (org-apple-reminders--apply-apple-field-values apple-values)
                                (set-marker m nil)))
                            ;; Pull new Apple items into sync-file only
                            (when is-sync-file
@@ -2265,7 +2291,7 @@ Apple's post-push state."
                                    (dolist (item items)
                                      (let ((id (alist-get 'id item)))
                                        (when (and (not (gethash id id-index))
-                                                  (not (eq (alist-get 'completed item) t)))
+                                                  (not (org-apple-reminders--apple-item-completed-p item)))
                                          (org-apple-reminders--goto-list-heading lname)
                                          (org-apple-reminders--stamp-list-section lname entry)
                                          (org-apple-reminders--insert-org-heading item lname)
