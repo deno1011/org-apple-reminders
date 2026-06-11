@@ -14,9 +14,10 @@ Run the deterministic ERT suite before touching real Apple Reminders:
 emacs --batch -L . -l tests/org-apple-reminders-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-These tests stub the JXA/Apple boundary and cover the sync-file outline rules,
-ordinary org-file host behavior, duplicate prevention, completion/deletion
-propagation, `CANCELLED`, and missing-list cleanup.
+These tests stub the JXA/Apple boundary and cover the sync-file outline rules
+(level 1 = list, level 2 = reminder, level 3 = local until real Apple subtask
+support exists), ordinary org-file host behavior, duplicate prevention,
+completion/deletion propagation, `CANCELLED`, and missing-list cleanup.
 
 ---
 

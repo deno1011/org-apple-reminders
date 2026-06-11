@@ -101,9 +101,9 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
              (when (string-prefix-p tmpdir file)
                (kill-buffer buf))))))))
 
-(ert-deftest org-apple-reminders-test-sync-file-outline-classification ()
+(ert-deftest org-apple-reminders-test-sync-file-levels-are-list-task-and-local-subtask ()
   (org-apple-reminders-test--with-env
-      "* TODO Work\n** TODO Parent\n*** TODO Child\n* Personal\n"
+      "* TODO Work\n** Plain parent\n** TODO Todo parent\n*** TODO Child is local until real subtask support exists\n* Personal\n"
       (list (org-apple-reminders-test--list "Work")
             (org-apple-reminders-test--list "Personal"))
     (org-apple-reminders-sync)
@@ -111,9 +111,19 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
       (should (string-match-p "^\\* TODO Work" text))
       (should (string-match-p "^\\* Personal" text))
       (should (= 2 (cl-count-if (lambda (a) (eq (car a) :create)) actions)))
-      (should (member '(:create "Work" "Parent" "created-1") actions))
-      (should (member '(:create "Work" "Child" "created-2") actions))
-      (should-not (member '(:create "Inbox" "Work" "created-1") actions)))))
+      (should (member '(:create "Work" "Plain parent" "created-1") actions))
+      (should (member '(:create "Work" "Todo parent" "created-2") actions))
+      (should-not (cl-find "Child is local until real subtask support exists"
+                           actions
+                           :key (lambda (action) (nth 2 action))
+                           :test #'equal))
+      (should-not (string-match-p
+                   "Child is local until real subtask support exists\\(.\\|\n\\)*:REMINDER_ID:"
+                   text))
+      (should-not (cl-find "Work"
+                           actions
+                           :key (lambda (action) (nth 2 action))
+                           :test #'equal)))))
 
 (ert-deftest org-apple-reminders-test-extra-file-is-update-only-with-explicit-list ()
   (org-apple-reminders-test--with-env
@@ -122,14 +132,14 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
     (setq org-apple-reminders-extra-files (list extra-file))
     (org-apple-reminders-test--write
      extra-file
-     "* TODO Ordinary top\n** TODO Ordinary child\n* Project\n** TODO Explicit\n:PROPERTIES:\n:REMINDER_LIST: Work\n:END:\n")
+     "* TODO Ordinary top\n** TODO Ordinary child\n* Project\n** Explicit plain heading\n:PROPERTIES:\n:REMINDER_LIST: Work\n:END:\n")
     (org-apple-reminders-sync)
     (should (= 1 (cl-count-if (lambda (a) (eq (car a) :create)) actions)))
-    (should (member '(:create "Work" "Explicit" "created-1") actions))
+    (should (member '(:create "Work" "Explicit plain heading" "created-1") actions))
     (let* ((text (org-apple-reminders-test--read extra-file))
            (ordinary-section (substring text 0 (string-match "^\\* Project" text))))
       (should-not (string-match-p ":REMINDER_ID:" ordinary-section))
-      (should (string-match-p "Explicit\\(.\\|\n\\)*:REMINDER_ID:" text)))))
+      (should (string-match-p "Explicit plain heading\\(.\\|\n\\)*:REMINDER_ID:" text)))))
 
 (ert-deftest org-apple-reminders-test-extra-file-linked-item-prevents-sync-duplicate ()
   (org-apple-reminders-test--with-env

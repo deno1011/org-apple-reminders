@@ -115,28 +115,22 @@ There are two ways to create a new Apple reminder from Org:
 - `C-c r R` (`org-apple-reminders-sync`) is automatic. It creates new Apple
   reminders only when it can determine the target Apple list without asking.
 
-Full sync chooses the list for a new unlinked `TODO` / `NEXT` / `WAITING`
-heading in this order:
+Full sync chooses the list for a new unlinked heading in this order:
 
 1. Existing `REMINDER_LIST` property on the heading.
-2. The nearest top-level list section in the sync file or a file listed in
-   `org-apple-reminders-extra-files`, for
-   example a heading under `* Work` goes to the Apple list `Work`.
-3. `org-apple-reminders-sync-list` / the default Apple list, only when no more
-   specific context exists.
+2. For level-2 headings in `org-apple-reminders-sync-file`, the nearest
+   top-level list section. For example, a heading under `* Work` goes to the
+   Apple list `Work`.
 
-That last fallback applies only in the sync file and
-`org-apple-reminders-extra-files`. Agenda files are still scanned for existing
+Agenda files and `org-apple-reminders-extra-files` are scanned for existing
 linked reminders, but their unrelated plain TODOs do not create Apple reminders
 or lists unless the heading has an explicit `REMINDER_LIST`. Use
 `REMINDER_NOSYNC: t` on headings that should stay local only.
 
-In the sync file and `org-apple-reminders-extra-files`, plain top-level
-headings are list sections and are created in Apple even when they have no
-child tasks. A top-level TODO with child headings is also treated as a list
-section, so accidentally unindented list headings do not become duplicate
-reminders. A bare top-level TODO without children is a reminder item and falls
-back to the configured/default Apple Reminders list. That means:
+In the sync file, plain top-level headings are list sections and are created in
+Apple even when they have no child tasks. A top-level TODO is also treated as a
+list section; its TODO keyword is local Org metadata and is not pushed as an
+Apple reminder. That means:
 
 ```org
 * Work
@@ -152,12 +146,13 @@ If you write a TODO at top level:
 ```
 
 full sync treats `Call supplier` as an Apple list name. It creates/uses the
-list, but does not create a reminder with the same name. Child TODOs under that
-heading are created as reminders in the `Call supplier` list.
+list, but does not create a reminder with the same name. Level-2 headings under
+that heading are created as reminders in the `Call supplier` list, with or
+without Org TODO keywords.
 
-Org subheadings are synced as separate reminders, not as Apple subtasks. Apple
-Reminders subtask hierarchy is not modeled by this package yet, so a `*** TODO`
-under a synced task is created as its own reminder in the same inferred list.
+Apple Reminders subtask hierarchy is not implemented yet. A `*** TODO` under a
+synced task is left local unless it already has `REMINDER_ID` /
+`REMINDER_LIST`; it is not flattened into a separate Apple reminder.
 
 ### Key bindings
 
@@ -203,8 +198,8 @@ Full bidirectional sync between `org-apple-reminders-sync-file` and all your App
 
 Existing linked reminders are synced wherever they live: the sync file,
 `org-apple-reminders-extra-files`, agenda files, and open org buffers. New
-plain TODOs are auto-created only when the target list can be inferred from a
-list section, an explicit `REMINDER_LIST`, or the configured/default list.
+plain headings are auto-created only when they are level-2 headings under a
+sync-file list section or when the heading has an explicit `REMINDER_LIST`.
 
 Background pulls happen automatically every `org-apple-reminders-auto-sync-interval` seconds and whenever Emacs is idle for 3 seconds after startup.
 
@@ -268,9 +263,9 @@ When you push from a file other than `reminders.org`, that file is
 registered in `org-apple-reminders-extra-files` so future syncs keep it up
 to date. `C-c r m` is a convenience alias for `C-c r p`.
 
-For future `C-c r R` auto-creation from that same file, put TODOs under a
-top-level list heading such as `* Work`; TODOs outside a list section use the
-configured/default Apple Reminders list.
+For future `C-c r R` auto-creation from that same file, add an explicit
+`REMINDER_LIST` property. Ordinary org files do not infer Apple lists from
+their outline structure.
 
 If a whole Apple Reminders list is deleted outside Emacs, the next full sync
 marks the matching top-level section in `reminders.org` as `DONE`. That `DONE`

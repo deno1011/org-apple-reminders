@@ -233,7 +233,7 @@ Always true when the effective included-lists value is nil."
 (defun org-apple-reminders--compute-reminder-files ()
   "Return files whose headings define Apple Reminders structure.
 Only `org-apple-reminders-sync-file' is structure-authoritative: level-1
-headings are Apple lists and child TODO headings may become Apple reminders.
+headings are Apple lists and level-2 headings may become Apple reminders.
 Other known files may host linked reminders, but they do not create lists or
 auto-create reminders from their outline structure."
   (org-apple-reminders--normalize-file-list
@@ -744,6 +744,13 @@ JSON.stringify({ok:true,list:name,listId:lid});"
 (defun org-apple-reminders--todo-open-p (state)
   "Return non-nil when TODO STATE is an active reminder state."
   (member state '("TODO" "NEXT" "WAITING")))
+
+(defun org-apple-reminders--active-heading-state-p (state)
+  "Return non-nil when TODO STATE represents an open reminder heading.
+Plain headings with no TODO keyword are active reminders in contexts that
+explicitly allow reminder creation."
+  (or (null state)
+      (org-apple-reminders--todo-open-p state)))
 
 (defun org-apple-reminders--todo-done-p (state)
   "Return non-nil when TODO STATE is a terminal reminder state."
@@ -1815,11 +1822,24 @@ When INCLUDE-DONE is non-nil, completed list sections are also matched."
   "Return non-nil when point is at a level-1 list heading in a known file."
   (org-apple-reminders--known-file-list-section-p))
 
+(defun org-apple-reminders--auto-create-reminder-heading-p (state)
+  "Return non-nil when the current heading may create an Apple reminder.
+The managed sync file maps level 1 to Apple lists and level 2 to reminders.
+Level 3 is reserved for future real subtask support and is not flattened into
+an ordinary Apple reminder.  Other known files may create reminders only when
+the heading has an explicit target such as REMINDER_LIST."
+  (and (org-apple-reminders--active-heading-state-p state)
+       (not (org-apple-reminders--known-file-list-heading-p))
+       (not (org-entry-get nil "REMINDER_NOSYNC"))
+       (not (string-empty-p (org-apple-reminders--org-title-value)))
+       (or (not (org-apple-reminders--in-sync-file-p))
+           (= (or (org-apple-reminders--heading-line-level) 0) 2))))
+
 (defun org-apple-reminders--ensure-known-file-lists ()
   "Ensure known-file list sections exist as Apple lists.
 Return the number of lists that were successfully ensured.  Plain level-1
-headings are list sections.  Level-1 TODO headings are list sections too
-when they have children; bare top-level TODOs are reminder items."
+headings are list sections.  Level-1 TODO headings are list sections too;
+their TODO keyword is local Org metadata, not an Apple reminder."
   (let ((n 0))
     (dolist (file (org-apple-reminders--reminder-files))
       (when (file-exists-p file)
@@ -1926,8 +1946,7 @@ cookies on the affected list headings."
 (defun org-apple-reminders--push-to-apple ()
   "Push changed org entries to Apple.  New items get REMINDER_ID stamped back.
 Auto-creation from unlinked headings only happens in the value of
-known reminder file list sections, explicit REMINDER_LIST properties,
-or the configured/default Apple list."
+level-2 sync-file list sections or explicit REMINDER_LIST properties."
   (org-apple-reminders--with-known-files-cache
     (when (org-apple-reminders--in-known-file-p)
       (org-apple-reminders--ensure-known-file-lists))
@@ -1942,15 +1961,14 @@ or the configured/default Apple list."
            (cond
             ((org-entry-get nil "REMINDER_DELETE")
              nil)
-            ((and (null id) rlist (org-apple-reminders--todo-open-p state)
-                  (not (org-apple-reminders--known-file-list-heading-p))
-                  (not (org-entry-get nil "REMINDER_NOSYNC")))
+            ((and (null id) rlist
+                  (org-apple-reminders--auto-create-reminder-heading-p state))
              (push (point-marker) new-pts))
             ((and id rlist (org-apple-reminders--todo-done-p state))
              (when (and cached
                         (not (org-apple-reminders--apple-item-completed-p cached)))
                (org-apple-reminders--complete-in-apple rlist id)))
-            ((and id rlist (org-apple-reminders--todo-open-p state))
+            ((and id rlist (org-apple-reminders--active-heading-state-p state))
              (let* ((vals (org-apple-reminders--org-item-values))
                     (cached-values (and cached
                                         (org-apple-reminders--apple-field-values cached)))
@@ -2073,10 +2091,10 @@ and .org files in `org-agenda-files'.
 Conflict resolution per linked heading (3-way):
 - No REMINDER_ID and target list is known → create in Apple, stamp ID back.
   Target list precedence is: explicit REMINDER_LIST, nearest level-1 list
-  heading in `org-apple-reminders-sync-file', then the configured/default list
-  only in that sync file.  Level-1 headings in the sync file are Apple lists
-  with or without Org TODO keywords.  Other org files may host linked reminders,
-  but their outline structure does not auto-create Apple lists or reminders.
+  heading in `org-apple-reminders-sync-file' for level-2 headings.  Level-1
+  headings in the sync file are Apple lists with or without Org TODO keywords.
+  Other org files may host linked reminders, but their outline structure does
+  not auto-create Apple lists or reminders.
 - No REMINDER_ID and no target list → leave the heading alone.  Use
   `C-c r p' for one-off reminders from arbitrary org files.
 - Apple modDate newer (apple-changed) → Apple wins: pull all fields,
@@ -2095,6 +2113,8 @@ Conflict resolution per linked heading (3-way):
 - CANCELLED in org → delete from Apple and remove the org subtree.
 - REMINDER_DELETE in org → delete from Apple, mark DONE, strip link properties.
 New open Apple items not linked in any known file → pulled into sync-file only.
+True Apple subtask sync is not implemented: level-3 sync-file headings are
+left local unless they are already linked reminders.
 
 Before fetching, modified known-file buffers are auto-saved (which
 fires `after-save-hook' → async push), and the function waits for all
@@ -2160,9 +2180,8 @@ Apple's post-push state."
                        (cond
                         ((org-apple-reminders--todo-cancelled-p state)
                          (push (point-marker) cancel-pts))
-                        ((and (null id) rlist (org-apple-reminders--todo-open-p state)
-                              (not (org-apple-reminders--known-file-list-heading-p))
-                              (not (org-entry-get nil "REMINDER_NOSYNC")))
+                        ((and (null id) rlist
+                              (org-apple-reminders--auto-create-reminder-heading-p state))
                          (push (point-marker) new-pts))
                         (id
                          (let ((apple (gethash id apple-by-id)))
@@ -2174,11 +2193,11 @@ Apple's post-push state."
                                   apple
                                   (not (org-apple-reminders--apple-item-completed-p apple)))
                              (org-apple-reminders--complete-in-apple rlist id))
-                            ((and (org-apple-reminders--todo-open-p state)
+                            ((and (org-apple-reminders--active-heading-state-p state)
                                   (or (null apple)
                                       (org-apple-reminders--apple-item-completed-p apple)))
                              (push (point-marker) done-pts))
-                            ((org-apple-reminders--todo-open-p state)
+                            ((org-apple-reminders--active-heading-state-p state)
                              (let* ((a-mod       (org-apple-reminders--apple-item-mod-date apple))
                                     (last-known  (org-apple-reminders--last-known-mod))
                                     (apple-changed (and a-mod
@@ -2388,7 +2407,7 @@ Apple's post-push state."
                                      (apple (and id (gethash id apple-by-id))))
                                 (when (and id
                                            (not (org-entry-get nil "REMINDER_DELETE"))
-                                           (org-apple-reminders--todo-open-p state)
+                                           (org-apple-reminders--active-heading-state-p state)
                                            (or (null apple)
                                                (org-apple-reminders--apple-item-completed-p apple)))
                                   (push (point-marker) done-pts))))
@@ -2404,7 +2423,8 @@ Apple's post-push state."
                                 (when (and item
                                            (not (org-entry-get nil "REMINDER_DELETE"))
                                            (not (org-apple-reminders--apple-item-completed-p item))
-                                           (org-apple-reminders--todo-open-p (org-get-todo-state)))
+                                           (org-apple-reminders--active-heading-state-p
+                                            (org-get-todo-state)))
                                   (let* ((apple-values (org-apple-reminders--apple-field-values item))
                                          (org-values (org-apple-reminders--current-org-field-values))
                                          (a-mod (alist-get 'mod-date apple-values))
