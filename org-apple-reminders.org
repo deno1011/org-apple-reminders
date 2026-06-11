@@ -2283,6 +2283,56 @@ the `org-ar-jxa' prefix that `--jxa-async' uses for `make-process'."
                          (process-list)))
       (accept-process-output nil 0.1))))
 
+;;; Diagnostics
+
+(defun org-apple-reminders--source-directory ()
+  "Return the package source directory for the loaded file when possible."
+  (when-let* ((file (or load-file-name
+                        (locate-library "org-apple-reminders")))
+              (dir (file-name-directory (file-truename file))))
+    (if (and (string= (file-name-nondirectory (directory-file-name dir))
+                      "org-apple-reminders")
+             (string= (file-name-nondirectory
+                       (directory-file-name
+                        (file-name-directory (directory-file-name dir))))
+                      "builds"))
+        (let ((source-dir
+               (expand-file-name
+                "../sources/org-apple-reminders/"
+                (file-name-directory
+                 (directory-file-name
+                  (file-name-directory (directory-file-name dir)))))))
+          (if (file-directory-p source-dir) source-dir dir))
+      dir)))
+
+(defun org-apple-reminders--git-description (directory)
+  "Return \"branch commit\" for DIRECTORY, or nil when unavailable."
+  (when (and directory (executable-find "git"))
+    (let* ((default-directory directory)
+           (branch (string-trim
+                    (or (ignore-errors
+                          (shell-command-to-string
+                           "git branch --show-current 2>/dev/null"))
+                        "")))
+           (commit (string-trim
+                    (or (ignore-errors
+                          (shell-command-to-string
+                           "git rev-parse --short HEAD 2>/dev/null"))
+                        ""))))
+      (unless (or (string-empty-p branch)
+                  (string-empty-p commit))
+        (format "%s %s" branch commit)))))
+
+(defun org-apple-reminders--loaded-message ()
+  "Log the loaded org-apple-reminders source and Git revision when available."
+  (let* ((source-dir (org-apple-reminders--source-directory))
+         (git-desc (org-apple-reminders--git-description source-dir)))
+    (message "org-apple-reminders loaded from %s%s"
+             (or source-dir "unknown location")
+             (if git-desc
+                 (format " (%s)" git-desc)
+               ""))))
+
 ;;;###autoload
 (defun org-apple-reminders-sync ()
   "Full bidirectional sync across all known org files ↔ Apple Reminders.
@@ -3046,6 +3096,7 @@ Binds `org-apple-reminders-command-map' under
   C-c r x   mark delete on sync C-c r u   unmark delete on sync
   C-c r d   remove from Apple (keep org heading)
   C-c r D   delete reminder (Apple and org)"
+  (org-apple-reminders--loaded-message)
   (when org-apple-reminders-keymap-prefix
     (global-set-key (kbd org-apple-reminders-keymap-prefix)
                     org-apple-reminders-command-map))
