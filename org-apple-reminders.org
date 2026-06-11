@@ -2290,18 +2290,14 @@ the `org-ar-jxa' prefix that `--jxa-async' uses for `make-process'."
   (when-let* ((file (or load-file-name
                         (locate-library "org-apple-reminders")))
               (dir (file-name-directory (file-truename file))))
-    (if (and (string= (file-name-nondirectory (directory-file-name dir))
-                      "org-apple-reminders")
-             (string= (file-name-nondirectory
-                       (directory-file-name
-                        (file-name-directory (directory-file-name dir))))
-                      "builds"))
-        (let ((source-dir
-               (expand-file-name
-                "../sources/org-apple-reminders/"
-                (file-name-directory
-                 (directory-file-name
-                  (file-name-directory (directory-file-name dir)))))))
+    (if-let* ((builds-dir (file-name-directory (directory-file-name dir)))
+              ((string= (file-name-nondirectory (directory-file-name dir))
+                        "org-apple-reminders"))
+              ((string= (file-name-nondirectory (directory-file-name builds-dir))
+                        "builds")))
+        (let ((source-dir (expand-file-name
+                           "../sources/org-apple-reminders/"
+                           builds-dir)))
           (if (file-directory-p source-dir) source-dir dir))
       dir)))
 
