@@ -396,6 +396,7 @@ already contains at least one REMINDER_ID (so files linked via
 `org-apple-reminders-push-heading' are picked up without manual config)."
   (org-apple-reminders--normalize-file-list
    (append (org-apple-reminders--compute-reminder-files)
+           org-apple-reminders-extra-files
            (cl-remove-if-not
             (lambda (f) (and (stringp f) (string-match-p "\\.org\\'" f)))
             org-agenda-files)
@@ -2242,14 +2243,13 @@ cookies on the affected list headings."
 
 =--push-to-apple= is the fast path used by the save hook.  Rather than
 fetching from Apple, it diffs each entry against the in-memory =--cache=
-populated by the last pull or sync, and pushes only what differs.  In every
-the sync file and `org-apple-reminders-extra-files', plain level-1 headings
-are list sections and are ensured as Apple lists even when they have no child
-tasks.  Level-1 TODO headings with children are list sections too; bare
-top-level TODOs in those files fall back to the configured/default Apple list.
-Agenda files remain update-only unless a heading carries an explicit
-REMINDER_LIST.  New-item creation is synchronous so the returned id can be
-stamped back.
+populated by the last pull or sync, and pushes only what differs.  In the
+sync file, level-1 headings are list sections and are ensured as Apple lists.
+Child TODO headings under those sections may be created as Apple reminders.
+Extra files and agenda files remain host/update files: linked reminders keep
+syncing there, and unlinked headings are created only when they carry an
+explicit REMINDER_LIST property.  New-item creation is synchronous so the
+returned id can be stamped back.
 
 #+begin_src emacs-lisp
 ;;; Push-only (org → Apple): called from save hook

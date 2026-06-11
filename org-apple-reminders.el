@@ -253,6 +253,7 @@ already contains at least one REMINDER_ID (so files linked via
 `org-apple-reminders-push-heading' are picked up without manual config)."
   (org-apple-reminders--normalize-file-list
    (append (org-apple-reminders--compute-reminder-files)
+           org-apple-reminders-extra-files
            (cl-remove-if-not
             (lambda (f) (and (stringp f) (string-match-p "\\.org\\'" f)))
             org-agenda-files)

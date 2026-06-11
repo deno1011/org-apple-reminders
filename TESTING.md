@@ -6,6 +6,18 @@ merging `main` → `stable`.
 Prerequisites: macOS, Emacs 27.1+, org-mode 9.3+, at least one Apple
 Reminders list with a few items.
 
+## Automated offline regression tests
+
+Run the deterministic ERT suite before touching real Apple Reminders:
+
+```sh
+emacs --batch -L . -l tests/org-apple-reminders-tests.el -f ert-run-tests-batch-and-exit
+```
+
+These tests stub the JXA/Apple boundary and cover the sync-file outline rules,
+ordinary org-file host behavior, duplicate prevention, completion/deletion
+propagation, `CANCELLED`, and missing-list cleanup.
+
 ---
 
 ## Setup
