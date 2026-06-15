@@ -2,6 +2,17 @@
 
 > Personal notes for future reference (e.g. when MELPA reviewers ask follow-up
 > questions). Compiled 2026-05-20.
+>
+> **Post-submission update (2026-06-15).** The package was later refactored
+> into a strict layered architecture (L1 config → L6 business logic; see the
+> README's *Implementation → Architecture* section). This document records the
+> state at submission time and is **not** rewritten for that change. The
+> submission-time invariants it relies on still hold after the refactor:
+> single literate `.org` tangling to one `.el`, `lexical-binding: t`, `#'`
+> function references, the `Assisted-by:` line, and clean `package-lint` /
+> byte-compile / `checkdoc` runs. The refactor work lives on the
+> `rewrite-layered` branch; re-verify these checks on whatever commit is
+> actually submitted before citing this walkthrough in a future PR.
 
 ## Context
 

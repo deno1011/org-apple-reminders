@@ -403,10 +403,25 @@ Progress cookies `[N/M]` on list headings are computed locally and never sent to
 
 ### Architecture
 
-The package uses **JavaScript for Automation (JXA)** via `osascript -l JavaScript` to talk directly to Apple Reminders — no CLI tools, no AppleScript parsing. All Apple calls are either:
+The package is one literate source (`org-apple-reminders.org`) that tangles to a single `org-apple-reminders.el`. Internally it is organised as a strict **layered stack** — each layer may only call the ones below it:
 
-- **Async** (`org-apple-reminders--jxa-async`): `make-process` with a sentinel callback — used for fire-and-forget writes (complete, create) and background pulls.
-- **Sync** (`org-apple-reminders--jxa-run`): `shell-command-to-string` — used only in `org-apple-reminders-sync` where we need the result before proceeding.
+| Layer | Responsibility |
+|---|---|
+| **L6 — Business logic** | `org-apple-reminders-sync`, background pull, save hook, setup, and the interactive commands; reads as a sequence of named steps |
+| **L5 — Org I/O** | reading/writing org buffers and property drawers, multi-file routing, the per-file reconcile/pull steps |
+| **L4 — Model & mapping** | the `--snapshot` / `--counts` data shapes, org↔Apple field translation, and the `--conflict-direction` decision |
+| **L3 — Apple API (JXA)** | typed wrappers: create/update/complete/delete reminders, ensure/delete lists |
+| **L2 — Transport** | the `osascript` boundary (sync and async) |
+| **L1 — Config & state** | `defcustom` options, faces, internal state |
+
+A function's layer is given by the section it lives in; a call that points "upward" is a smell. This keeps each concern understandable on its own, and lets the test suite stub the L3 boundary to exercise everything above it offline.
+
+#### Transport (L2)
+
+All Apple calls go through **JavaScript for Automation (JXA)** via `osascript -l JavaScript` — no CLI tools, no AppleScript parsing. Calls are either:
+
+- **Async** (`org-apple-reminders--jxa-async`): `make-process` with a sentinel callback — fire-and-forget writes (complete, create) and background pulls.
+- **Sync** (`org-apple-reminders--jxa-run`): `shell-command-to-string` — used where the result is needed before proceeding; `org-apple-reminders--jxa-run-json` wraps it with JSON parsing.
 
 ### Conflict resolution (two-timestamp model)
 
@@ -415,17 +430,14 @@ The core challenge is knowing who changed what since the last sync. The package 
 - **`REMINDER_APPLE_MOD`**: Apple's `modificationDate` at the moment we last applied Apple's data to org (background pull, Apple-wins branch of sync, or new item pulled from Apple).
 - **`REMINDER_ORG_MOD`**: Apple's `modificationDate` immediately after we last pushed org data to Apple (save hook, org-wins branch of sync).
 
-On each sync, for an entry with Apple `modDate = A`:
+The decision lives in one pure predicate, `org-apple-reminders--conflict-direction`, which both the full sync and the background pull consult. For an entry with Apple `modDate = A` and `last-known = max(REMINDER_APPLE_MOD, REMINDER_ORG_MOD)` it returns one of:
 
-```
-last-known = max(REMINDER_APPLE_MOD, REMINDER_ORG_MOD)
-apple-changed = A > last-known
-```
+- **`:apple-wins`** — `A > last-known` and Apple's tracked fields differ → pull them into org, stamp `REMINDER_APPLE_MOD = A`.
+- **`:apple-reconciled`** — `A > last-known` but every field already matches org → just restamp `REMINDER_APPLE_MOD = A`.
+- **`:org-wins`** — Apple not newer and `REMINDER_ORG_MOD > REMINDER_APPLE_MOD` → push org (including cleared fields), stamp `REMINDER_ORG_MOD` = Apple's post-push `modificationDate`.
+- **`:backfill`** — neither side newer → fill missing org fields from Apple, push only non-empty org diffs.
 
-- **`apple-changed` = true** → Apple wins: pull priority/due/flagged from Apple, stamp `REMINDER_APPLE_MOD = A`.
-- **`apple-changed` = false** → org wins: compare org fields against Apple's fetched state; push only if different, stamp `REMINDER_ORG_MOD` = Apple's post-push `modificationDate`.
-
-Both timestamps are Apple ISO 8601 UTC strings, so `string>` comparison works directly without parsing.
+The background pull is non-destructive: it acts only on the two Apple-changed outcomes and never pushes. Both timestamps are Apple ISO 8601 UTC strings, so `string>` comparison works directly without parsing.
 
 ### Batch JXA fetch
 
