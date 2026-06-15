@@ -309,4 +309,185 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
       (should (string-match-p "\\*\\* TODO Fresh from apple" text))
       (should (string-match-p ":REMINDER_ID:[ \t]+w9" text)))))
 
+;;; --- List lifecycle ---------------------------------------------------------
+
+(ert-deftest org-apple-reminders-test-new-list-section-creates-apple-list ()
+  "A new `* List' section in the sync file creates the Apple list and its items."
+  (org-apple-reminders-test--with-env
+      "* Work\n* Groceries\n** TODO Milk\n"
+      (list (org-apple-reminders-test--list "Work"))
+    (org-apple-reminders-sync)
+    (should (member '(:ensure-list "Groceries") actions))
+    (should (member '(:create "Groceries" "Milk" "created-1") actions))))
+
+(ert-deftest org-apple-reminders-test-excluded-list-section-is-pruned ()
+  "A pure list section not in `included-lists' is removed from the sync file."
+  (org-apple-reminders-test--with-env
+      "* Work\n* Personal\n"
+      (list (org-apple-reminders-test--list "Work")
+            (org-apple-reminders-test--list "Personal"))
+    (setq org-apple-reminders-included-lists '("Work"))
+    (org-apple-reminders-sync)
+    (let ((text (org-apple-reminders-test--read sync-file)))
+      (should (string-match-p "^\\* Work" text))
+      (should-not (string-match-p "Personal" text)))))
+
+(ert-deftest org-apple-reminders-test-excluded-list-apple-item-not-pulled ()
+  "An open Apple item in a non-included list is not pulled into the sync file."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "w1" "Keep" nil "Work"))
+            (org-apple-reminders-test--list
+             "Personal" (org-apple-reminders-test--item "p1" "Drop" nil "Personal")))
+    (setq org-apple-reminders-included-lists '("Work"))
+    (org-apple-reminders-sync)
+    (let ((text (org-apple-reminders-test--read sync-file)))
+      (should (string-match-p "Keep" text))
+      (should-not (string-match-p "Drop" text)))))
+
+;;; --- Multi-file / moving reminders ------------------------------------------
+
+(ert-deftest org-apple-reminders-test-reminder-moved-to-other-file-not-reduplicated ()
+  "A reminder moved out of the sync file into another file stays there only."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "m1" "Moved" nil "Work")))
+    (setq org-apple-reminders-extra-files (list extra-file))
+    (org-apple-reminders-test--write
+     extra-file
+     "* Project notes\n** TODO Moved\n:PROPERTIES:\n:REMINDER_ID: m1\n:REMINDER_LIST: Work\n:END:\n")
+    (org-apple-reminders-sync)
+    (should-not (string-match-p "Moved" (org-apple-reminders-test--read sync-file)))
+    (should (string-match-p "Moved" (org-apple-reminders-test--read extra-file)))
+    (should-not (cl-find :create actions :key #'car))
+    (should-not (cl-find :delete actions :key #'car))))
+
+(ert-deftest org-apple-reminders-test-edit-linked-reminder-in-extra-file-pushes ()
+  "Editing a linked reminder in an extra file (org newer) pushes the update."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "m1" "Old title" nil "Work")))
+    (setq org-apple-reminders-extra-files (list extra-file))
+    (org-apple-reminders-test--write
+     extra-file
+     "* Project\n** TODO New title\n:PROPERTIES:\n:REMINDER_ID: m1\n:REMINDER_LIST: Work\n:REMINDER_APPLE_MOD: 2026-06-11T09:00:00Z\n:REMINDER_ORG_MOD: 2026-06-11T12:00:00Z\n:END:\n")
+    (org-apple-reminders-sync)
+    (should (member '(:update "Work" "m1" "New title") actions))))
+
+(ert-deftest org-apple-reminders-test-apple-completed-marks-extra-file-done ()
+  "An Apple-completed item marks its linked heading DONE in an extra file."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "m1" "Finish me" t "Work")))
+    (setq org-apple-reminders-extra-files (list extra-file))
+    (org-apple-reminders-test--write
+     extra-file
+     "* Project\n** TODO Finish me\n:PROPERTIES:\n:REMINDER_ID: m1\n:REMINDER_LIST: Work\n:END:\n")
+    (org-apple-reminders-sync)
+    (should (string-match-p "\\*\\* DONE Finish me"
+                            (org-apple-reminders-test--read extra-file)))))
+
+;;; --- Structure / subitems ---------------------------------------------------
+
+(ert-deftest org-apple-reminders-test-level3-subitem-never-creates-reminder ()
+  "Level-3 headings under a reminder never become Apple reminders."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Parent\n*** TODO Child subtask\n"
+      (list (org-apple-reminders-test--list "Work"))
+    (org-apple-reminders-sync)
+    (should (member '(:create "Work" "Parent" "created-1") actions))
+    (should-not (cl-find "Child subtask" actions
+                         :key (lambda (a) (nth 2 a)) :test #'equal))
+    (should-not (string-match-p
+                 "Child subtask\\(.\\|\n\\)*:REMINDER_ID:"
+                 (org-apple-reminders-test--read sync-file)))))
+
+(ert-deftest org-apple-reminders-test-plain-level2-heading-creates-reminder ()
+  "A plain (no TODO keyword) level-2 heading under a list is created."
+  (org-apple-reminders-test--with-env
+      "* Work\n** Plain heading\n"
+      (list (org-apple-reminders-test--list "Work"))
+    (org-apple-reminders-sync)
+    (should (member '(:create "Work" "Plain heading" "created-1") actions))))
+
+(ert-deftest org-apple-reminders-test-reminder-nosync-skips-creation ()
+  "A heading tagged REMINDER_NOSYNC is never pushed to Apple."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Skip me\n:PROPERTIES:\n:REMINDER_NOSYNC: t\n:END:\n"
+      (list (org-apple-reminders-test--list "Work"))
+    (org-apple-reminders-sync)
+    (should-not (cl-find "Skip me" actions
+                         :key (lambda (a) (nth 2 a)) :test #'equal))
+    (should-not (string-match-p
+                 "Skip me\\(.\\|\n\\)*:REMINDER_ID:"
+                 (org-apple-reminders-test--read sync-file)))))
+
+;;; --- Delete marking ---------------------------------------------------------
+
+(ert-deftest org-apple-reminders-test-reminder-delete-mark-removes-and-finalizes ()
+  "A REMINDER_DELETE heading is deleted from Apple, marked DONE, and unlinked."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Kill it\n:PROPERTIES:\n:REMINDER_ID: k1\n:REMINDER_LIST: Work\n:REMINDER_DELETE: t\n:END:\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "k1" "Kill it" nil "Work")))
+    (org-apple-reminders-sync)
+    (should (member '(:delete "Work" "k1") actions))
+    (let ((text (org-apple-reminders-test--read sync-file)))
+      (should (string-match-p "\\*\\* DONE Kill it" text))
+      (should-not (string-match-p ":REMINDER_ID:[ \t]+k1" text)))))
+
+;;; --- Idempotency ------------------------------------------------------------
+
+(ert-deftest org-apple-reminders-test-sync-twice-is-idempotent ()
+  "A second sync with unchanged state makes no changes and no duplicates."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Stable\n:PROPERTIES:\n:REMINDER_ID: s1\n:REMINDER_LIST: Work\n:REMINDER_APPLE_MOD: 2026-06-11T10:00:00Z\n:REMINDER_ORG_MOD: 2026-06-11T10:00:00Z\n:END:\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "s1" "Stable" nil "Work")))
+    (org-apple-reminders-sync)
+    (let ((after-first (org-apple-reminders-test--read sync-file)))
+      (setq actions nil)
+      (org-apple-reminders-sync)
+      (let ((after-second (org-apple-reminders-test--read sync-file)))
+        (should (equal after-first after-second))
+        (should-not (cl-find :create actions :key #'car))
+        (should-not (cl-find :update actions :key #'car))
+        (should (= 1 (cl-count "Stable" (split-string after-second "\n")
+                               :test (lambda (a b) (string-match-p a b)))))))))
+
+;;; --- Field mapping ----------------------------------------------------------
+
+(ert-deftest org-apple-reminders-test-org-item-values-maps-all-fields ()
+  "`--org-item-values' maps title, priority, flag, deadline and notes."
+  (with-temp-buffer
+    (let ((org-todo-keywords '((sequence "TODO" "|" "DONE"))))
+      (org-mode)
+      (insert "* TODO [#A] Task title :flagged:\n")
+      (insert "DEADLINE: <2026-09-01 Tue 14:30>\n")
+      (insert "the body text\n")
+      (goto-char (point-min))
+      (let ((vals (org-apple-reminders--org-item-values)))
+        (should (equal (alist-get 'title vals) "Task title"))
+        (should (= (alist-get 'priority vals) 1))
+        (should (eq (alist-get 'flagged vals) t))
+        (should (equal (alist-get 'due vals) "2026-09-01T14:30"))
+        (should (string-match-p "the body text" (alist-get 'notes vals)))))))
+
+(ert-deftest org-apple-reminders-test-deadline-with-time-pulled-from-apple ()
+  "A pulled Apple item with a timed due date becomes a timed org DEADLINE."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      (list `((list . "Work") (listId . "list-Work")
+              (items . [((id . "t1") (title . "Timed") (completed . :json-false)
+                         (notes . "") (due . "2026-09-01T14:30") (priority . 0)
+                         (flagged . :json-false)
+                         (modDate . "2026-06-11T10:00:00Z") (list . "Work"))])))
+    (org-apple-reminders-sync)
+    (should (string-match-p "DEADLINE: <2026-09-01[^>]*14:30"
+                            (org-apple-reminders-test--read sync-file)))))
+
 ;;; org-apple-reminders-tests.el ends here
