@@ -2774,3 +2774,5 @@ Binds `org-apple-reminders-command-map' under
   (org-apple-reminders--setup-capture)
   (org-apple-reminders--start-sync-timer)
   (run-with-idle-timer 3 nil #'org-apple-reminders--background-pull))
+
+(provide 'org-apple-reminders)

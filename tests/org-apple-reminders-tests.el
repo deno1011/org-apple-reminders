@@ -555,4 +555,10 @@ stamps REMINDER_APPLE_MOD."
         (should (string-match-p "line two" text))
         (should (string-match-p ":REMINDER_APPLE_MOD: 2026-06-11T10:00:00Z" text))))))
 
+;;; --- Package hygiene --------------------------------------------------------
+
+(ert-deftest org-apple-reminders-test-package-provides-feature ()
+  "The file must (provide 'org-apple-reminders) so require / use-package work."
+  (should (featurep 'org-apple-reminders)))
+
 ;;; org-apple-reminders-tests.el ends here
