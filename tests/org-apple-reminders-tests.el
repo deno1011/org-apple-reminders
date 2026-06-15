@@ -490,4 +490,31 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
     (should (string-match-p "DEADLINE: <2026-09-01[^>]*14:30"
                             (org-apple-reminders-test--read sync-file)))))
 
+(ert-deftest org-apple-reminders-test-move-reminder-between-lists-in-sync-file ()
+  "Pushing a linked reminder to another list moves it (no duplicate) and
+relocates its subtree under the new list section in the sync file."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Task\n:PROPERTIES:\n:REMINDER_ID: w1\n:REMINDER_LIST: Work\n:END:\n* Personal\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "w1" "Task" nil "Work"))
+            (org-apple-reminders-test--list "Personal"))
+    (with-current-buffer (find-file-noselect sync-file)
+      (goto-char (point-min))
+      (re-search-forward "^\\*\\* TODO Task")
+      (org-apple-reminders-push-heading "Personal"))
+    ;; Apple side: recreated in Personal, removed from Work — never duplicated.
+    (should (member '(:create "Personal" "Task" "created-1") actions))
+    (should (member '(:delete "Work" "w1") actions))
+    (let* ((text (org-apple-reminders-test--read sync-file))
+           (personal-pos (string-match "^\\* Personal" text))
+           (task-pos (string-match "TODO Task" text)))
+      ;; Now in the Personal list, not Work.
+      (should (string-match-p ":REMINDER_LIST: Personal" text))
+      (should-not (string-match-p ":REMINDER_LIST: Work" text))
+      ;; Subtree relocated below the Personal heading.
+      (should (and personal-pos task-pos (> task-pos personal-pos)))
+      ;; Exactly one Task heading — no duplicate left under Work.
+      (should (= 1 (cl-count-if (lambda (l) (string-match-p "TODO Task" l))
+                                (split-string text "\n")))))))
+
 ;;; org-apple-reminders-tests.el ends here
