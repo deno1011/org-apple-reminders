@@ -517,4 +517,42 @@ relocates its subtree under the new list section in the sync file."
       (should (= 1 (cl-count-if (lambda (l) (string-match-p "TODO Task" l))
                                 (split-string text "\n")))))))
 
+;;; --- Capture template -------------------------------------------------------
+
+(ert-deftest org-apple-reminders-test-capture-template-is-well-formed ()
+  "`--setup-capture' registers a level-2 TODO template targeting the sync file."
+  (require 'org-capture)
+  (let ((org-capture-templates nil)
+        (org-apple-reminders-default-list "Inbox")
+        (org-apple-reminders-sync-file "/tmp/oar-test-reminders.org"))
+    (org-apple-reminders--setup-capture)
+    (let ((tpl (assoc "A" org-capture-templates)))
+      (should tpl)
+      (should (equal (nth 1 tpl) "Apple Reminder"))
+      (should (eq (nth 2 tpl) 'entry))
+      (let ((target (nth 3 tpl)))
+        (should (eq (car target) 'file+headline))
+        (should (equal (nth 2 target) "Inbox")))
+      (let ((body (nth 4 tpl)))
+        (should (string-match-p "\\*\\* TODO %\\?" body))
+        (should (string-match-p ":REMINDER_LIST: Inbox" body))))))
+
+;;; --- Notes pull direction ---------------------------------------------------
+
+(ert-deftest org-apple-reminders-test-apply-apple-values-writes-multiline-notes ()
+  "Applying Apple field values writes multi-line notes into the org body and
+stamps REMINDER_APPLE_MOD."
+  (with-temp-buffer
+    (let ((org-todo-keywords '((sequence "TODO" "|" "DONE"))))
+      (org-mode)
+      (insert "* TODO Task\n:PROPERTIES:\n:REMINDER_ID: x1\n:REMINDER_LIST: Work\n:END:\n")
+      (goto-char (point-min))
+      (org-apple-reminders--apply-apple-field-values
+       '((title . "Task") (priority . 0) (due . nil) (flagged . nil)
+         (notes . "line one\nline two") (mod-date . "2026-06-11T10:00:00Z")))
+      (let ((text (buffer-string)))
+        (should (string-match-p "line one" text))
+        (should (string-match-p "line two" text))
+        (should (string-match-p ":REMINDER_APPLE_MOD: 2026-06-11T10:00:00Z" text))))))
+
 ;;; org-apple-reminders-tests.el ends here
