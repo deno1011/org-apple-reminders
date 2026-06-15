@@ -1625,7 +1625,7 @@ cookies on the affected list headings."
     (setf (org-apple-reminders--counts-lists-done counts) n-lists-done)))
 
 (defun org-apple-reminders--sync-delete-marked (snapshot counts)
-  "Delete reminders flagged REMINDER_DELETE; record the count in COUNTS."
+  "Delete reminders flagged REMINDER_DELETE against SNAPSHOT; record into COUNTS."
   (setf (org-apple-reminders--counts-deleted counts)
         (org-apple-reminders--delete-marked-reminders
          (org-apple-reminders--snapshot-by-id snapshot))))
@@ -1750,7 +1750,8 @@ cookies on the affected list headings."
     (cl-incf (org-apple-reminders--counts-deleted counts) n-deleted)))
 
 (defun org-apple-reminders--sync-pull-new (snapshot counts)
-  "Phase 2: prune excluded lists and pull new Apple items into the sync file."
+  "Phase 2: prune excluded lists and pull new SNAPSHOT items into the sync file.
+Record pruned/deleted/pulled tallies into COUNTS."
   (let ((sync-file (expand-file-name org-apple-reminders-sync-file))
         (data (org-apple-reminders--snapshot-data snapshot))
         (id-index (org-apple-reminders--snapshot-id-index snapshot))
@@ -1874,7 +1875,7 @@ cookies on the affected list headings."
                            (save-buffer)))))))
 
 (defun org-apple-reminders--redo-agenda-buffers ()
-  "Redisplay any live org-agenda buffers after a background pull."
+  "Redisplay any live Org agenda buffers after a background pull."
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
@@ -2094,7 +2095,7 @@ the `org-ar-jxa' prefix that `--jxa-async' uses for `make-process'."
 
 (defun org-apple-reminders-refresh-delete-mark-visibility ()
   "Refresh display-only markers for headings marked REMINDER_DELETE=t.
-In org buffers this marks the heading line itself.  In org-agenda buffers
+In Org buffers this marks the heading line itself.  In Org agenda buffers
 this marks agenda rows whose source heading carries REMINDER_DELETE=t."
   (interactive)
   (org-apple-reminders--clear-delete-mark-overlays)
@@ -2776,3 +2777,5 @@ Binds `org-apple-reminders-command-map' under
   (run-with-idle-timer 3 nil #'org-apple-reminders--background-pull))
 
 (provide 'org-apple-reminders)
+
+;;; org-apple-reminders.el ends here
