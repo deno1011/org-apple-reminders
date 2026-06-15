@@ -349,6 +349,23 @@ One `%s' placeholder: JSON-encoded raw reminder UUID (without the
 object with `ok' (boolean) and optionally `modDate' (ISO-ish date
 string from EventKit) or `err' on failure.")
 
+(defun org-apple-reminders--parse-json (raw &rest args)
+  "Parse RAW as JSON, forwarding ARGS to `json-parse-string'; nil on error."
+  (condition-case nil
+      (apply #'json-parse-string raw args)
+    (error nil)))
+
+(defun org-apple-reminders--jxa-run-json (script &rest args)
+  "Run JXA SCRIPT synchronously and parse its stdout as JSON; nil on error.
+ARGS are forwarded to `json-parse-string'."
+  (apply #'org-apple-reminders--parse-json
+         (org-apple-reminders--jxa-run script) args))
+
+(defun org-apple-reminders--due-date->js (due)
+  "Return a JXA `new Date(...)' expression for the org DUE timestamp string."
+  (format "new Date(%s)"
+          (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))))
+
 (defun org-apple-reminders--strip-id-prefix (id)
   "Strip the `x-apple-reminder://' prefix from ID if present."
   (if (and (stringp id) (string-prefix-p "x-apple-reminder://" id))
@@ -362,22 +379,16 @@ success, or nil on failure.  Falls back to fetching modDate via JXA
 since EventKit's `lastModifiedDate' formatting is locale-dependent."
   (let* ((bare-id (org-apple-reminders--strip-id-prefix id))
          (script  (format org-apple-reminders--clear-due-template
-                          (json-encode bare-id))))
-    (condition-case nil
-        (let ((parsed (json-parse-string
-                       (org-apple-reminders--jxa-run script)
-                       :object-type 'alist :null-object nil)))
-          (when (alist-get 'ok parsed)
-            ;; Pull a fresh ISO modDate via JXA since the EventKit one was
-            ;; locale-dependent (its description format varies by user
-            ;; locale).  JXA's modificationDate.toISOString() is stable.
-            (let* ((mod-script
-                    (format "var r=Application('Reminders').reminders.byId(%s);var m=r.modificationDate();JSON.stringify((m&&m instanceof Date)?m.toISOString():null);"
-                            (json-encode id))))
-              (condition-case nil
-                  (json-parse-string (org-apple-reminders--jxa-run mod-script))
-                (error nil)))))
-      (error nil))))
+                          (json-encode bare-id)))
+         (parsed  (org-apple-reminders--jxa-run-json
+                   script :object-type 'alist :null-object nil)))
+    (when (alist-get 'ok parsed)
+      ;; Pull a fresh ISO modDate via JXA since the EventKit one was
+      ;; locale-dependent (its description format varies by user locale).
+      ;; JXA's modificationDate.toISOString() is stable.
+      (org-apple-reminders--jxa-run-json
+       (format "var r=Application('Reminders').reminders.byId(%s);var m=r.modificationDate();JSON.stringify((m&&m instanceof Date)?m.toISOString():null);"
+               (json-encode id))))))
 
 (defun org-apple-reminders--complete-in-apple (list-name id)
   "Mark Apple reminder ID in LIST-NAME as completed (async)."
@@ -418,11 +429,8 @@ JSON.stringify(newId);"
            (json-encode list-name)
            (json-encode title) (json-encode notes) prio
            (if flagged "true" "false")
-           (if due (format ",dueDate:new Date(%s)"
-                           (json-encode (concat due (if (string-match "T" due) ":00" "T00:00:00")))) ""))))
-    (condition-case nil
-        (json-parse-string (org-apple-reminders--jxa-run script))
-      (error nil))))
+           (if due (format ",dueDate:%s" (org-apple-reminders--due-date->js due)) ""))))
+    (org-apple-reminders--jxa-run-json script)))
 
 (defun org-apple-reminders--update-in-apple (list-name id vals &optional callback)
   "Push VALS alist to Apple reminder ID in LIST-NAME.
@@ -438,12 +446,8 @@ errors with -1700."
          (due        (alist-get 'due      vals))
          (flagged    (alist-get 'flagged  vals))
          (clear-due  (or (null due) (and (stringp due) (string-empty-p due))))
-         ;; When clearing, omit any due-line from the JXA script entirely —
-         ;; EventKit handles the clear in a second step.
          (due-line   (if clear-due ""
-                       (format "r.dueDate=new Date(%s);"
-                               (json-encode (concat due (if (string-match "T" due)
-                                                            ":00" "T00:00:00"))))))
+                       (format "r.dueDate=%s;" (org-apple-reminders--due-date->js due))))
          (script
           (format
            "var r=Application('Reminders').lists.byName(%s).reminders.byId(%s);
@@ -452,48 +456,36 @@ var md=r.modificationDate();JSON.stringify((md&&md instanceof Date)?md.toISOStri
            (json-encode list-name) (json-encode id)
            (json-encode title) (json-encode notes) prio
            (if flagged "true" "false")
-           due-line))
-         ;; When clearing, do EventKit clear FIRST.  If we clear after the
-         ;; JXA write, EventKit's `calendarItemWithIdentifier:' holds a
-         ;; stale snapshot whose save races with the JXA-bumped modDate
-         ;; and ends up leaving the original dueDate in place.  Clearing
-         ;; first means JXA's subsequent write doesn't touch dueDate
-         ;; (`due-line' is empty), so the cleared state survives.
-         )
+           due-line)))
+    ;; When clearing, do the EventKit clear FIRST.  Clearing after the JXA
+    ;; write lets EventKit's stale snapshot race the JXA-bumped modDate and
+    ;; leave the old dueDate in place; clearing first means the JXA write
+    ;; (with an empty `due-line') never touches dueDate, so the clear sticks.
     (when clear-due
       (org-apple-reminders--clear-due-in-apple id))
     (if callback
         (org-apple-reminders--jxa-async
          script
-         (lambda (raw)
-           (funcall callback
-                    (condition-case nil (json-parse-string raw) (error nil)))))
-      (condition-case nil
-          (json-parse-string (org-apple-reminders--jxa-run script))
-        (error nil)))))
+         (lambda (raw) (funcall callback (org-apple-reminders--parse-json raw))))
+      (org-apple-reminders--jxa-run-json script))))
 
 (defun org-apple-reminders--ensure-list (list-name)
   "Ensure an Apple Reminders list named LIST-NAME exists, creating it if absent.
 Return parsed list metadata on success."
-  (let ((script
-         (format "var app=Application('Reminders'),name=%s;
+  (org-apple-reminders--jxa-run-json
+   (format "var app=Application('Reminders'),name=%s;
 if(app.lists.name().indexOf(name)<0){app.lists.push(app.List({name:name}));}
 var l=app.lists.byName(name),lid=null;
 try{lid=String(l.id());}catch(e){}
 JSON.stringify({ok:true,list:name,listId:lid});"
-                 (json-encode list-name))))
-    (condition-case nil
-        (json-parse-string (org-apple-reminders--jxa-run script)
-                           :object-type 'alist :null-object nil)
-      (error nil))))
+           (json-encode list-name))
+   :object-type 'alist :null-object nil))
 
 (defun org-apple-reminders-lists ()
   "Return a list of Apple Reminders list names."
-  (let ((raw (org-apple-reminders--jxa-run
-              "JSON.stringify(Application('Reminders').lists.name())")))
-    (condition-case nil
-        (append (json-parse-string raw :array-type 'vector) nil)
-      (error nil))))
+  (org-apple-reminders--jxa-run-json
+   "JSON.stringify(Application('Reminders').lists.name())"
+   :array-type 'list))
 #+end_src
 
 * L4 — Model & mapping
