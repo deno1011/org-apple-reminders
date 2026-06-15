@@ -177,6 +177,10 @@ REMINDER_DELETE property remains the source of truth for batch deletion."
 (defvar org-apple-reminders--sync-timer nil
   "Timer handle for periodic background pulls.")
 
+(defconst org-apple-reminders--sync-file-template
+  "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n"
+  "Preamble written when the sync file is created on demand.")
+
 (defun org-apple-reminders--jxa-run (script)
   "Run JXA SCRIPT synchronously via osascript.  Return stdout string."
   (string-trim (shell-command-to-string
@@ -786,7 +790,7 @@ Return non-nil when the org heading was changed."
         (previous-lists (org-apple-reminders--cached-list-names)))
     (unless (file-exists-p sync-file)
       (with-temp-file sync-file
-        (insert "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n")))
+        (insert org-apple-reminders--sync-file-template)))
     (let* ((raw (org-apple-reminders--jxa-run org-apple-reminders--fetch-script))
            (data (condition-case nil
                      (json-parse-string raw :object-type 'alist :array-type 'list)
@@ -1188,6 +1192,16 @@ Return the number of marked headings finalized in org.  Callers must bind
       (insert "\n"))
     (insert (format "* %s [/]\n" list-name)))
   (unless (bolp) (insert "\n")))
+
+(defun org-apple-reminders--ensure-list-cookies ()
+  "Give every level-1 list heading a [/] progress cookie, then recompute them."
+  (org-map-entries
+   (lambda ()
+     (unless (save-excursion (beginning-of-line)
+                             (looking-at "[^\n]*\\[[0-9]*/[0-9]*\\]"))
+       (end-of-line) (insert " [/]"))
+     (org-update-statistics-cookies nil))
+   "LEVEL=1" nil))
 
 (defun org-apple-reminders--normalize-list-spacing ()
   "Ensure a blank line precedes every `* ' list heading except the first one.
@@ -1719,13 +1733,7 @@ cookies on the affected list headings."
                       (set-marker m nil)))
                   ;; Progress cookies only in sync-file (uses * ListName structure)
                   (when is-sync-file
-                    (org-map-entries
-                     (lambda ()
-                       (unless (save-excursion (beginning-of-line)
-                                               (looking-at "[^\n]*\\[[0-9]*/[0-9]*\\]"))
-                         (end-of-line) (insert " [/]"))
-                       (org-update-statistics-cookies nil))
-                     "LEVEL=1" nil))
+                    (org-apple-reminders--ensure-list-cookies))
                   (save-buffer)
                   (dolist (m (nreverse changed-positions))
                     (when (marker-position m)
@@ -1874,15 +1882,7 @@ cookies on the affected list headings."
                                                (org-set-property "REMINDER_APPLE_MOD" mod-date))))
                                          (puthash id sync-file id-index))))))))
                            (when is-sync-file
-                             (org-map-entries
-                              (lambda ()
-                                (unless (save-excursion
-                                          (beginning-of-line)
-                                          (looking-at "[^\n]*\\[[0-9]*/[0-9]*\\]"))
-                                  (end-of-line)
-                                  (insert " [/]"))
-                                (org-update-statistics-cookies nil))
-                              "LEVEL=1" nil))
+                             (org-apple-reminders--ensure-list-cookies))
                            (save-buffer)))))))
 
 (defun org-apple-reminders--redo-agenda-buffers ()
@@ -2167,7 +2167,7 @@ this marks agenda rows whose source heading carries REMINDER_DELETE=t."
           (progn
             (make-directory (file-name-directory sync-file) t)
             (with-temp-file sync-file
-              (insert "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n")))
+              (insert org-apple-reminders--sync-file-template)))
         (error nil)))
     (when (file-exists-p sync-file)
       (add-to-list 'org-agenda-files sync-file))
