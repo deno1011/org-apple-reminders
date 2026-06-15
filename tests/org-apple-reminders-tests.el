@@ -293,4 +293,20 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
     (should (string-match-p "\\*\\* DONE Will complete"
                             (org-apple-reminders-test--read sync-file)))))
 
+(ert-deftest org-apple-reminders-test-background-pull-pulls-new-open-item ()
+  "Background pull inserts a new open Apple item into the sync file."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      nil
+    (let ((data (list (org-apple-reminders-test--list
+                       "Work" (org-apple-reminders-test--item
+                               "w9" "Fresh from apple" nil "Work")))))
+      (cl-letf (((symbol-function 'org-apple-reminders--jxa-async)
+                 (lambda (_script callback)
+                   (funcall callback (json-encode (vconcat data))))))
+        (org-apple-reminders--background-pull)))
+    (let ((text (org-apple-reminders-test--read sync-file)))
+      (should (string-match-p "\\*\\* TODO Fresh from apple" text))
+      (should (string-match-p ":REMINDER_ID:[ \t]+w9" text)))))
+
 ;;; org-apple-reminders-tests.el ends here

@@ -1361,6 +1361,24 @@ Tidies sections that earlier versions inserted flush against each other."
             (insert "\n")))
         (forward-line 1)))))
 
+(defun org-apple-reminders--pull-item-into-sync-file (item entry id-index sync-file)
+  "Insert open Apple ITEM under its list section (from ENTRY) in the sync file.
+Stamp the list section, set REMINDER_APPLE_MOD from the item, and index its id
+in ID-INDEX against SYNC-FILE.  Return a marker at the list heading so callers
+that track changed positions can reveal it."
+  (let ((list-name (alist-get 'list entry)))
+    (org-apple-reminders--goto-list-heading list-name)
+    (org-apple-reminders--stamp-list-section list-name entry)
+    (let ((marker (point-marker)))
+      (org-apple-reminders--insert-org-heading item list-name)
+      (save-excursion
+        (org-back-to-heading t)
+        (let ((md (alist-get 'modDate item)))
+          (when (stringp md)
+            (org-set-property "REMINDER_APPLE_MOD" md))))
+      (puthash (alist-get 'id item) sync-file id-index)
+      marker)))
+
 (defun org-apple-reminders--insert-org-heading (item list-name)
   "Insert ** TODO org heading for Apple ITEM under LIST-NAME's section."
   (let* ((id      (alist-get 'id       item))
@@ -1902,16 +1920,9 @@ green again.
                             (progn
                               (org-apple-reminders--delete-in-apple lname id)
                               (setq n-deleted (1+ n-deleted)))
-                          (org-apple-reminders--goto-list-heading lname)
-                          (org-apple-reminders--stamp-list-section lname entry)
-                          (push (point-marker) changed-positions)
-                          (org-apple-reminders--insert-org-heading item lname)
-                          (save-excursion
-                            (org-back-to-heading t)
-                            (let ((md (alist-get 'modDate item)))
-                              (when (stringp md)
-                                (org-set-property "REMINDER_APPLE_MOD" md))))
-                          (puthash id sync-file id-index)
+                          (push (org-apple-reminders--pull-item-into-sync-file
+                                 item entry id-index sync-file)
+                                changed-positions)
                           (setq n-pulled (1+ n-pulled)))))))))
             ;; Keep a blank line before every list heading, then recalculate
             ;; the [N/M] progress cookies — freshly pulled items (and new
@@ -1993,15 +2004,7 @@ green again.
                                      (let ((id (alist-get 'id item)))
                                        (when (and (not (gethash id id-index))
                                                   (not (org-apple-reminders--apple-item-completed-p item)))
-                                         (org-apple-reminders--goto-list-heading list-name)
-                                         (org-apple-reminders--stamp-list-section list-name entry)
-                                         (org-apple-reminders--insert-org-heading item list-name)
-                                         (save-excursion
-                                           (org-back-to-heading t)
-                                           (when-let ((mod-date (alist-get 'modDate item)))
-                                             (when (stringp mod-date)
-                                               (org-set-property "REMINDER_APPLE_MOD" mod-date))))
-                                         (puthash id sync-file id-index))))))))
+                                         (org-apple-reminders--pull-item-into-sync-file item entry id-index sync-file))))))))
                            (when is-sync-file
                              (org-apple-reminders--ensure-list-cookies))
                            (save-buffer)))))))
