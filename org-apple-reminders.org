@@ -874,6 +874,35 @@ Return non-nil when the org heading was changed."
      (omod omod)
      (t nil))))
 
+(defun org-apple-reminders--conflict-direction (apple)
+  "Decide how to reconcile the linked, open heading at point against APPLE item.
+Compares Apple's modDate against max(REMINDER_APPLE_MOD, REMINDER_ORG_MOD) and
+returns one of:
+- `:apple-wins'        Apple changed and its tracked fields differ — pull them.
+- `:apple-reconciled'  Apple's modDate advanced but every field already matches
+                       org — just restamp REMINDER_APPLE_MOD.
+- `:org-wins'          Apple not newer and REMINDER_ORG_MOD > REMINDER_APPLE_MOD
+                       — push org (including cleared fields).
+- `:backfill'          Neither side newer — fill missing org fields from Apple,
+                       push only non-empty org diffs."
+  (let* ((a-mod (org-apple-reminders--apple-item-mod-date apple))
+         (last-known (org-apple-reminders--last-known-mod))
+         (apple-changed (and a-mod
+                             (or (null last-known)
+                                 (string> a-mod last-known)))))
+    (if apple-changed
+        (if (org-apple-reminders--field-values-differ-p
+             (org-apple-reminders--apple-field-values apple)
+             (org-apple-reminders--current-org-field-values))
+            :apple-wins
+          :apple-reconciled)
+      (let ((apple-mod-prop (org-entry-get nil "REMINDER_APPLE_MOD"))
+            (org-mod-prop   (org-entry-get nil "REMINDER_ORG_MOD")))
+        (if (and org-mod-prop apple-mod-prop
+                 (string> org-mod-prop apple-mod-prop))
+            :org-wins
+          :backfill)))))
+
 ;; -- snapshot builders (consume the accessors above) --
 
 (defun org-apple-reminders--snapshot-build (data previous-lists)
@@ -1757,71 +1786,38 @@ green again.
                                       (org-apple-reminders--apple-item-completed-p apple)))
                              (push (point-marker) done-pts))
                             ((org-apple-reminders--active-heading-state-p state)
-                             (let* ((a-mod       (org-apple-reminders--apple-item-mod-date apple))
-                                    (last-known  (org-apple-reminders--last-known-mod))
-                                    (apple-changed (and a-mod
-                                                        (or (null last-known)
-                                                            (string> a-mod last-known)))))
-                               (if apple-changed
-                                   (let* ((apple-values (org-apple-reminders--apple-field-values apple))
-                                          (org-values (org-apple-reminders--current-org-field-values))
-                                          (changed (org-apple-reminders--field-values-differ-p
-                                                    apple-values org-values)))
-                                     (if changed
-                                         (push (list (point-marker) apple-values) apple-updates)
-                                       ;; Apple's modDate advanced but every tracked
-                                       ;; field already matches org — record that this
-                                       ;; modDate is reconciled so org edits can win later.
-                                       (when (stringp a-mod)
-                                         (org-set-property "REMINDER_APPLE_MOD" a-mod))))
-                                 ;; Apple not "changed".  Split into two
-                                 ;; sub-cases:
-                                 ;;   org-changed: org pushed something since
-                                 ;;     Apple was last seen — push including
-                                 ;;     nils (clears Apple's field).
-                                 ;;   neither:    BACKFILL missing org fields
-                                 ;;     from Apple; for fields where org has
-                                 ;;     non-nil content that differs, still
-                                 ;;     push (preserves user content) but
-                                 ;;     never push nil from org.
-                                 (let* ((vals      (org-apple-reminders--org-item-values))
-                                        (apple-mod-prop (org-entry-get nil "REMINDER_APPLE_MOD"))
-                                        (org-mod-prop   (org-entry-get nil "REMINDER_ORG_MOD"))
-                                        (org-changed   (and org-mod-prop apple-mod-prop
-                                                            (string> org-mod-prop apple-mod-prop)))
-                                        (apple-values (org-apple-reminders--apple-field-values apple)))
-                                   (if org-changed
-                                       ;; ORG-WINS: push all diffs including
-                                       ;; nils (Bug-1 fix means clearing Apple's
-                                       ;; dueDate via EventKit now works).
-                                       (let ((needs-push
-                                              (org-apple-reminders--org-push-needed-p
-                                               vals apple-values t)))
-                                         (when needs-push
-                                           (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
-                                             (when (stringp new-mod)
-                                               (org-set-property "REMINDER_ORG_MOD" new-mod)))
-                                           (setq n-updated (1+ n-updated))))
-                                     ;; NEITHER NEWER: backfill missing org
-                                     ;; fields, push non-nil org diffs only.
-                                     (let* ((did-bf (org-apple-reminders--backfill-from-apple apple-values)))
-                                       ;; Recompute vals after backfills, then
-                                       ;; check for any non-nil push needs.
-                                       (let* ((vals2 (if did-bf
-                                                         (org-apple-reminders--org-item-values)
-                                                       vals))
-                                              (needs-push
-                                               (org-apple-reminders--org-push-needed-p
-                                                vals2 apple-values nil)))
-                                         (when needs-push
-                                           (let ((new-mod (org-apple-reminders--update-in-apple
-                                                           rlist id vals2)))
-                                             (when (stringp new-mod)
-                                               (org-set-property "REMINDER_ORG_MOD" new-mod))))
-                                         (when (or did-bf needs-push)
-                                           (when (stringp a-mod)
-                                             (org-set-property "REMINDER_APPLE_MOD" a-mod))
-                                           (setq n-updated (1+ n-updated))))))))))))))))
+                             (pcase (org-apple-reminders--conflict-direction apple)
+                               (:apple-wins
+                                (push (list (point-marker)
+                                            (org-apple-reminders--apple-field-values apple))
+                                      apple-updates))
+                               (:apple-reconciled
+                                (let ((a-mod (org-apple-reminders--apple-item-mod-date apple)))
+                                  (when (stringp a-mod)
+                                    (org-set-property "REMINDER_APPLE_MOD" a-mod))))
+                               (:org-wins
+                                (let ((vals (org-apple-reminders--org-item-values))
+                                      (apple-values (org-apple-reminders--apple-field-values apple)))
+                                  (when (org-apple-reminders--org-push-needed-p vals apple-values t)
+                                    (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals)))
+                                      (when (stringp new-mod)
+                                        (org-set-property "REMINDER_ORG_MOD" new-mod)))
+                                    (setq n-updated (1+ n-updated)))))
+                               (:backfill
+                                (let* ((a-mod (org-apple-reminders--apple-item-mod-date apple))
+                                       (apple-values (org-apple-reminders--apple-field-values apple))
+                                       (did-bf (org-apple-reminders--backfill-from-apple apple-values))
+                                       (vals2 (org-apple-reminders--org-item-values))
+                                       (needs-push (org-apple-reminders--org-push-needed-p
+                                                    vals2 apple-values nil)))
+                                  (when needs-push
+                                    (let ((new-mod (org-apple-reminders--update-in-apple rlist id vals2)))
+                                      (when (stringp new-mod)
+                                        (org-set-property "REMINDER_ORG_MOD" new-mod))))
+                                  (when (or did-bf needs-push)
+                                    (when (stringp a-mod)
+                                      (org-set-property "REMINDER_APPLE_MOD" a-mod))
+                                    (setq n-updated (1+ n-updated)))))))))))))
                    nil nil)
                   (dolist (m (org-apple-reminders--markers-deepest-first cancel-pts))
                     (when (marker-position m)
@@ -1972,19 +1968,16 @@ green again.
                                            (not (org-apple-reminders--apple-item-completed-p item))
                                            (org-apple-reminders--active-heading-state-p
                                             (org-get-todo-state)))
-                                  (let* ((apple-values (org-apple-reminders--apple-field-values item))
-                                         (org-values (org-apple-reminders--current-org-field-values))
-                                         (a-mod (alist-get 'mod-date apple-values))
-                                         (last-known (org-apple-reminders--last-known-mod))
-                                         (apple-changed
-                                          (and a-mod
-                                               (or (null last-known)
-                                                   (string> a-mod last-known)))))
-                                    (when apple-changed
-                                      (if (org-apple-reminders--field-values-differ-p
-                                           apple-values org-values)
-                                          (push (list (point-marker) apple-values) field-updates)
-                                        (org-set-property "REMINDER_APPLE_MOD" a-mod)))))))
+                                  (pcase (org-apple-reminders--conflict-direction item)
+                                    (:apple-wins
+                                     (push (list (point-marker)
+                                                 (org-apple-reminders--apple-field-values item))
+                                           field-updates))
+                                    (:apple-reconciled
+                                     (let ((a-mod (org-apple-reminders--apple-item-mod-date item)))
+                                       (when (stringp a-mod)
+                                         (org-set-property "REMINDER_APPLE_MOD" a-mod))))
+                                    (_ nil)))))
                             nil nil)
                            (dolist (update (nreverse field-updates))
                              (cl-destructuring-bind (marker apple-values) update
