@@ -561,4 +561,37 @@ stamps REMINDER_APPLE_MOD."
   "The file must (provide 'org-apple-reminders) so require / use-package work."
   (should (featurep 'org-apple-reminders)))
 
+(ert-deftest org-apple-reminders-test-checkdoc-baseline ()
+  "Hold checkdoc to its accepted baseline so new nits fail the suite.
+The 9 long-standing \"within reason\" findings are:
+  - 2 `C-c' keycode references in user-facing docstrings (intentional — the
+    setup/visibility commands document their key bindings);
+  - 7 arguments not restated in their docstrings: callback, list-name,
+    apple-list-names, state, previous-list-names, and beg (in two commands).
+A different count is a regression (e.g. a new function whose docstring omits an
+argument, as the layered rebuild briefly did with SNAPSHOT).  Run
+`M-x checkdoc-file' on the .el to see what changed, then fix the docstring or,
+if the change is intended, update this baseline with a note.
+
+Checkdoc is run in a clean `emacs -Q' subprocess — the canonical environment
+the MELPA checks use — because checkdoc's findings depend on which symbols are
+bound (a loaded session flags extra `org-agenda-files' references)."
+  (let* ((src (or (let ((f (symbol-file 'org-apple-reminders-sync 'defun)))
+                    (and f (concat (file-name-sans-extension f) ".el")))
+                  (expand-file-name "org-apple-reminders.el")))
+         (emacs (expand-file-name invocation-name invocation-directory))
+         (errfile (make-temp-file "oar-checkdoc")))
+    (should (and src (file-exists-p src)))
+    (unwind-protect
+        (progn
+          (call-process emacs nil (list nil errfile) nil
+                        "-Q" "--batch"
+                        "--eval" (format "(progn (require 'checkdoc) (checkdoc-file %S))"
+                                         src))
+          (let ((count (with-temp-buffer
+                         (insert-file-contents errfile)
+                         (how-many ":[0-9]+: " (point-min) (point-max)))))
+            (should (= count 9))))
+      (delete-file errfile))))
+
 ;;; org-apple-reminders-tests.el ends here
