@@ -236,4 +236,61 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
     (should (member (expand-file-name extra-file)
                     (org-apple-reminders--known-files)))))
 
+;;; Conflict-resolution branches (guard rails for the --conflict-direction refactor)
+
+(ert-deftest org-apple-reminders-test-conflict-apple-wins-pulls-fields ()
+  "Apple modDate newer than last-known → Apple wins; org fields are pulled."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Title old\n:PROPERTIES:\n:REMINDER_ID: w1\n:REMINDER_LIST: Work\n:REMINDER_APPLE_MOD: 2026-06-11T09:00:00Z\n:REMINDER_ORG_MOD: 2026-06-11T09:00:00Z\n:END:\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "w1" "Title new" nil "Work")))
+    (org-apple-reminders-sync)
+    (let ((text (org-apple-reminders-test--read sync-file)))
+      (should (string-match-p "\\*\\* TODO Title new" text))
+      (should-not (string-match-p "Title old" text)))
+    ;; Apple wins → nothing pushed to Apple.
+    (should-not (cl-find :update actions :key #'car))
+    (should-not (cl-find :create actions :key #'car))))
+
+(ert-deftest org-apple-reminders-test-conflict-org-wins-pushes-update ()
+  "REMINDER_ORG_MOD > REMINDER_APPLE_MOD and Apple not newer → org wins; push."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Locally edited\n:PROPERTIES:\n:REMINDER_ID: w1\n:REMINDER_LIST: Work\n:REMINDER_APPLE_MOD: 2026-06-11T09:00:00Z\n:REMINDER_ORG_MOD: 2026-06-11T12:00:00Z\n:END:\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "w1" "Old apple title" nil "Work")))
+    (org-apple-reminders-sync)
+    (should (member '(:update "Work" "w1" "Locally edited") actions))
+    (should (string-match-p "\\*\\* TODO Locally edited"
+                            (org-apple-reminders-test--read sync-file)))))
+
+(ert-deftest org-apple-reminders-test-conflict-neither-newer-backfills-missing-field ()
+  "Neither side newer → backfill a missing org field from Apple, without pushing."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Backfill me\n:PROPERTIES:\n:REMINDER_ID: w1\n:REMINDER_LIST: Work\n:REMINDER_APPLE_MOD: 2026-06-11T10:00:00Z\n:REMINDER_ORG_MOD: 2026-06-11T10:00:00Z\n:END:\n"
+      (list `((list . "Work") (listId . "list-Work")
+              (items . [((id . "w1") (title . "Backfill me")
+                         (completed . :json-false) (notes . "")
+                         (due . "2026-06-20") (priority . 0)
+                         (flagged . :json-false)
+                         (modDate . "2026-06-11T10:00:00Z") (list . "Work"))])))
+    (org-apple-reminders-sync)
+    (should (string-match-p "DEADLINE: <2026-06-20"
+                            (org-apple-reminders-test--read sync-file)))
+    (should-not (cl-find :update actions :key #'car))))
+
+(ert-deftest org-apple-reminders-test-background-pull-marks-completed-done ()
+  "Background pull marks a heading DONE when its Apple item is completed."
+  (org-apple-reminders-test--with-env
+      "* Work\n** TODO Will complete\n:PROPERTIES:\n:REMINDER_ID: w1\n:REMINDER_LIST: Work\n:END:\n"
+      nil
+    (let ((data (list (org-apple-reminders-test--list
+                       "Work" (org-apple-reminders-test--item
+                               "w1" "Will complete" t "Work")))))
+      (cl-letf (((symbol-function 'org-apple-reminders--jxa-async)
+                 (lambda (_script callback)
+                   (funcall callback (json-encode (vconcat data))))))
+        (org-apple-reminders--background-pull)))
+    (should (string-match-p "\\*\\* DONE Will complete"
+                            (org-apple-reminders-test--read sync-file)))))
+
 ;;; org-apple-reminders-tests.el ends here
