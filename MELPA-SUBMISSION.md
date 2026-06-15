@@ -5,14 +5,29 @@
 >
 > **Post-submission update (2026-06-15).** The package was later refactored
 > into a strict layered architecture (L1 config → L6 business logic; see the
-> README's *Implementation → Architecture* section). This document records the
-> state at submission time and is **not** rewritten for that change. The
-> submission-time invariants it relies on still hold after the refactor:
-> single literate `.org` tangling to one `.el`, `lexical-binding: t`, `#'`
-> function references, the `Assisted-by:` line, and clean `package-lint` /
-> byte-compile / `checkdoc` runs. The refactor work lives on the
-> `rewrite-layered` branch; re-verify these checks on whatever commit is
-> actually submitted before citing this walkthrough in a future PR.
+> README's *Implementation → Architecture* section), released as **`v1.15`**
+> (`main`/`stable` = `21761e9`). This document records the state at submission
+> time and is **not** rewritten for that change.
+>
+> The four MELPA checks below were **re-verified on the `v1.15` source** (Emacs
+> 30.2, `package-lint 20260427`):
+>
+> | Check | v1.15 result |
+> |---|---|
+> | `package-lint` (#5) | **CLEAN** |
+> | byte-compile (#6) | **CLEAN** — 0 warnings, `emacs -Q --batch -L . -f batch-byte-compile` |
+> | `checkdoc` (#7) | 9 findings, all the same "within reason" nits as the prior release (7 arg-not-in-docstring + the 2 principled `C-c` keycode nits from §8); no regressions |
+> | recipe / loads (#8) | `require` provides the feature; 32-test ert suite passes; live full sync verified in the running daemon |
+>
+> Two defects the refactor briefly introduced were caught and fixed before this
+> tag: a dropped `(provide 'org-apple-reminders)` and a dropped
+> `;;; …​ ends here` footer — the latter is the harder one, since without it
+> `package.el` cannot parse the file and `package-lint` errors out entirely
+> ("cannot parse this buffer"). The ert suite loads with `load-file`, which
+> needs neither, so a guard test (`featurep`) now covers `provide`; the footer
+> is asserted by the `package-lint` run. The submission-time invariants
+> (literate `.org` → one `.el`, `lexical-binding: t`, `#'` refs, `Assisted-by:`)
+> all still hold.
 
 ## Context
 
