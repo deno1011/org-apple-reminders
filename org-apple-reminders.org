@@ -7,11 +7,13 @@ implementation is preserved, inactive, under [[file:attic/org-apple-reminders.or
 reference while the rebuild proceeds.
 
 *Build status:* COMPLETE.  All six layers are authored (L1 config → L6 business
-logic + surface).  The tangle byte-compiles with zero warnings and passes the
-full =tests/= ert suite (10/10), reproducing the attic implementation's
-behaviour.  The structure is in place; the line-count reduction (collapsing the
-duplicated JXA / field / drawer logic) is the next phase, now safe to do under
-the green test suite.
+logic + surface), and the de-duplication pass is done: the conflict decision
+(=--conflict-direction=), the pull-new step (=--pull-item-into-sync-file=), the
+progress-cookie pass, and the Apple-API JSON/date helpers each now live in one
+place.  The tangle byte-compiles with zero warnings and passes the full =tests/=
+ert suite (31/31), reproducing the attic implementation's behaviour; a live
+create/update/clear-due/complete/delete round-trip against real Reminders was
+verified separately.
 
 * Architecture
 
@@ -2984,25 +2986,27 @@ Binds `org-apple-reminders-command-map' under
   (run-with-idle-timer 3 nil #'org-apple-reminders--background-pull))
 #+end_src
 
-* Next phase: line reduction
+* De-duplication pass (done)
 
-All six layers are built and the =tests/= suite is green, so the structural
-rebuild is done.  This pass was a *faithful* extraction — the gnarly bodies were
-copied byte-for-byte from =attic/=, so the file is still ~2790 lines.  The
-readability and line-count win comes next, now safe to do under the test suite:
+After the faithful layered extraction, the duplicated logic the layering exposed
+was collapsed, each step verified by re-running the ert suite and keeping the
+public surface and stubbed L3 boundary intact:
 
-1. *One JXA script builder + dispatch (L2/L3).*  Collapse the repeated inline JS
-   string-building in the create/update/complete/delete wrappers.
-2. *Fold the per-heading conflict =cond= into an L4 =--conflict-direction=*
-   returning =:push= / =:pull= / =:backfill= / =:done= / =:create= / =:delete= /
-   =:cancel=.  =--sync-reconcile-file= and =--background-pull= then share one
-   decision instead of each inlining the dual-timestamp comparison.
-3. *One property-drawer read/write pair (L4/L5)* to remove the duplication
-   between the push path and the org-file helpers.
-4. *Unify the sync vs background-pull "pull-new" + cookie passes* — they are
-   near-identical and can share a helper.
+1. *Conflict decision* — the per-heading dual-timestamp =cond= became the pure
+   L4 =--conflict-direction= (=:apple-wins= / =:apple-reconciled= / =:org-wins= /
+   =:backfill=), shared by =--sync-reconcile-file= and the background pull.
+2. *Pull-new* — the sync and background-pull both insert new Apple items via the
+   one =--pull-item-into-sync-file= helper.
+3. *Progress cookies* — the repeated level-1 =[/]= pass became
+   =--ensure-list-cookies=; the sync-file preamble became
+   =--sync-file-template=.
+4. *Apple API boilerplate (L3)* — the repeated JSON-parse dance became
+   =--parse-json= / =--jxa-run-json=, and the =new Date(...)= due expression
+   became =--due-date->js=.  No JXA dispatch table: each operation's JavaScript
+   is genuinely distinct, so only the elisp-side boilerplate was shared (the
+   generated osascript is byte-for-byte unchanged).
 
-Each step keeps the public surface and the stubbed L3 boundary intact, and is
-verified by re-running the ert suite.
+This was de-duplication, not line-golf: the file stayed near its original size,
+but each concern now has a single source of truth.
 
 ;;; org-apple-reminders.el ends here
