@@ -56,7 +56,8 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
           (org-apple-reminders-saved-included-lists 'unset)
           (org-todo-keywords '((sequence "TODO" "NEXT" "WAITING" "|" "DONE" "CANCELLED")))
           (org-todo-keywords-1 '("TODO" "NEXT" "WAITING" "DONE" "CANCELLED"))
-          (org-apple-reminders--cache nil))
+          (org-apple-reminders--cache nil)
+          (org-apple-reminders--file-metadata-cache (make-hash-table :test #'equal)))
      (org-apple-reminders-test--write sync-file ,sync-text)
      (cl-letf (((symbol-function 'org-apple-reminders--jxa-run)
                 (lambda (&rest _) (json-encode (vconcat (or ,apple-data nil)))))
@@ -235,6 +236,60 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
     (org-apple-reminders-test--write extra-file "* TODO Host\n")
     (should (member (expand-file-name extra-file)
                     (org-apple-reminders--known-files)))))
+
+(ert-deftest org-apple-reminders-test-agenda-files-without-reminder-metadata-are-skipped ()
+  "Agenda files without reminder metadata are not opened as known files."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      (list (org-apple-reminders-test--list "Work"))
+    (let* ((agenda-file (expand-file-name "agenda.org" (file-name-directory sync-file)))
+           (opened nil)
+           (original-find-file-noselect (symbol-function 'find-file-noselect)))
+      (org-apple-reminders-test--write agenda-file "* TODO Plain agenda task\n")
+      (setq org-agenda-files (list agenda-file))
+      (cl-letf (((symbol-function 'find-file-noselect)
+                 (lambda (file &rest args)
+                   (when (equal (expand-file-name file)
+                                (expand-file-name agenda-file))
+                     (setq opened t))
+                   (apply original-find-file-noselect file args))))
+        (org-apple-reminders-sync))
+      (should-not opened)
+      (should-not (member (expand-file-name agenda-file)
+                          (org-apple-reminders--known-files))))))
+
+(ert-deftest org-apple-reminders-test-agenda-file-linked-item-prevents-sync-duplicate ()
+  "A REMINDER_ID in an agenda file is discovered without explicit extra-files."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      (list (org-apple-reminders-test--list
+             "Work" (org-apple-reminders-test--item "a1" "Linked in agenda" nil "Work")))
+    (let ((agenda-file (expand-file-name "agenda.org" (file-name-directory sync-file))))
+      (org-apple-reminders-test--write
+       agenda-file
+       "* Project\n** TODO Linked in agenda\n:PROPERTIES:\n:REMINDER_ID: a1\n:REMINDER_LIST: Work\n:END:\n")
+      (setq org-agenda-files (list agenda-file))
+      (org-apple-reminders-sync)
+      (should (member (expand-file-name agenda-file)
+                      (org-apple-reminders--known-files)))
+      (should-not (string-match-p "Linked in agenda"
+                                  (org-apple-reminders-test--read sync-file)))
+      (should-not (cl-find :create actions :key #'car)))))
+
+(ert-deftest org-apple-reminders-test-agenda-file-explicit-list-can-create-reminder ()
+  "A REMINDER_LIST in an agenda file still opts that file into sync."
+  (org-apple-reminders-test--with-env
+      "* Work\n"
+      (list (org-apple-reminders-test--list "Work"))
+    (let ((agenda-file (expand-file-name "agenda.org" (file-name-directory sync-file))))
+      (org-apple-reminders-test--write
+       agenda-file
+       "* Project\n** TODO Agenda create\n:PROPERTIES:\n:REMINDER_LIST: Work\n:END:\n")
+      (setq org-agenda-files (list agenda-file))
+      (org-apple-reminders-sync)
+      (should (member (expand-file-name agenda-file)
+                      (org-apple-reminders--known-files)))
+      (should (member '(:create "Work" "Agenda create" "created-1") actions)))))
 
 ;;; Conflict-resolution branches (guard rails for the --conflict-direction refactor)
 

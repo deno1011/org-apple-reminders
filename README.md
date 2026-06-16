@@ -77,7 +77,7 @@ Clone this repository and add it to your load path:
 | `org-apple-reminders-included-lists` | `nil` (all) | Config-declared lists to sync; nil means all lists |
 | `org-apple-reminders-included-lists-prefer-config` | `nil` | If non-nil, the config list always wins over the saved one |
 | `org-apple-reminders-saved-included-lists` | `unset` | Set by `C-c r i`, persisted to `custom-file` — don't edit by hand |
-| `org-apple-reminders-extra-files` | `nil` | Extra org files scanned for reminder headings; level-1 headings are Apple list sections |
+| `org-apple-reminders-extra-files` | `nil` | Extra org files scanned for reminder headings; agenda files are discovered only when they contain reminder metadata |
 | `org-apple-reminders-keymap-prefix` | `"C-c r"` | Prefix key for the command map; `nil` to not bind |
 
 Set `org-apple-reminders-included-lists` to restrict which Apple Reminders lists are pulled into org:
@@ -122,9 +122,11 @@ Full sync chooses the list for a new unlinked heading in this order:
    top-level list section. For example, a heading under `* Work` goes to the
    Apple list `Work`.
 
-Agenda files and `org-apple-reminders-extra-files` are scanned for existing
-linked reminders, but their unrelated plain TODOs do not create Apple reminders
-or lists unless the heading has an explicit `REMINDER_LIST`. Use
+Agenda files are first checked with a cheap text scan and only files containing
+`REMINDER_ID` or `REMINDER_LIST` metadata enter the sync set.
+`org-apple-reminders-extra-files` are always scanned for existing linked
+reminders, but unrelated plain TODOs in ordinary files do not create Apple
+reminders or lists unless the heading has an explicit `REMINDER_LIST`. Use
 `REMINDER_NOSYNC: t` on headings that should stay local only.
 
 In the sync file, plain top-level headings are list sections and are created in
@@ -197,9 +199,10 @@ Set it to `nil` to bind no prefix and wire up the keymap yourself:
 Full bidirectional sync between `org-apple-reminders-sync-file` and all your Apple Reminders lists. The sync file is created automatically on first run.
 
 Existing linked reminders are synced wherever they live: the sync file,
-`org-apple-reminders-extra-files`, agenda files, and open org buffers. New
-plain headings are auto-created only when they are level-2 headings under a
-sync-file list section or when the heading has an explicit `REMINDER_LIST`.
+`org-apple-reminders-extra-files`, agenda files that contain reminder metadata,
+and open org buffers. New plain headings are auto-created only when they are
+level-2 headings under a sync-file list section or when the heading has an
+explicit `REMINDER_LIST`.
 
 Background pulls happen automatically every `org-apple-reminders-auto-sync-interval` seconds and whenever Emacs is idle for 3 seconds after startup.
 

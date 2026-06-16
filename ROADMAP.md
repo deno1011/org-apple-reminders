@@ -9,6 +9,13 @@ _(nothing in active development)_
 
 ## Done
 
+- **Reminder metadata discovery avoids agenda-wide org parsing** (v1.15.1) —
+  Agenda files now enter the multi-file sync set only when a cheap property
+  drawer scan finds `REMINDER_ID` or `REMINDER_LIST`.  The id index is built
+  from the same lightweight scan instead of `org-map-entries`, so background
+  pulls no longer force org-element parsing across unrelated agenda files while
+  reminders in arbitrary org files still sync. ✓ Merged to `main` (v1.15.1).
+
 - **URL field sync removed** (v1.13) — Five attempts (v1.10, v1.10.1,
   v1.11, v1.11.1, v1.12) tried to round-trip Apple Reminders' "link"
   attachment (the globe icon shown on a reminder card).  Each attempt

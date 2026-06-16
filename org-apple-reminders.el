@@ -4,7 +4,7 @@
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-8
-;; Version: 1.15
+;; Version: 1.15.1
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -127,8 +127,9 @@ Do not edit by hand — use `org-apple-reminders-set-included-lists'."
 (defcustom org-apple-reminders-extra-files nil
   "Additional org files scanned for linked Apple Reminders headings.
 These files may contain REMINDER_ID headings alongside arbitrary content
-\(Babel blocks, LaTeX, prose, etc.).  Together with `org-agenda-files'
-they form the full search space for existing reminder links.
+\(Babel blocks, LaTeX, prose, etc.).  `org-agenda-files' are also searched,
+but only as a discovery source: agenda files enter the sync set when a cheap
+text scan finds REMINDER_ID or REMINDER_LIST metadata.
 
 New Apple items that are not linked in any known file are pulled into
 `org-apple-reminders-sync-file' only.  Extra files are not extended with
@@ -176,6 +177,9 @@ REMINDER_DELETE property remains the source of truth for batch deletion."
 
 (defvar org-apple-reminders--sync-timer nil
   "Timer handle for periodic background pulls.")
+
+(defvar org-apple-reminders--file-metadata-cache (make-hash-table :test #'equal)
+  "Cache of reminder metadata found by cheap file scans.")
 
 (defconst org-apple-reminders--sync-file-template
   "#+TITLE: Reminders\n#+STARTUP: overview\n#+TODO: TODO NEXT WAITING | DONE CANCELLED\n\n"
@@ -856,23 +860,22 @@ auto-create reminders from their outline structure."
     org-apple-reminders--reminder-files-cache))
 
 (defun org-apple-reminders--compute-known-files ()
-  "Deduped list of all org files that may contain REMINDER_ID headings.
+  "Deduped list of org files that may contain reminder metadata.
 Includes `org-apple-reminders-sync-file', `org-apple-reminders-extra-files',
-.org files from `org-agenda-files', and any currently open org buffer that
-already contains at least one REMINDER_ID (so files linked via
-`org-apple-reminders-push-heading' are picked up without manual config)."
+.org files from `org-agenda-files' that contain REMINDER_ID or REMINDER_LIST,
+and any currently open org buffer that already contains reminder metadata
+\(so files linked via `org-apple-reminders-push-heading' are picked up without
+manual config)."
   (org-apple-reminders--normalize-file-list
    (append (org-apple-reminders--compute-reminder-files)
            org-apple-reminders-extra-files
-           (cl-remove-if-not
-            (lambda (f) (and (stringp f) (string-match-p "\\.org\\'" f)))
-            org-agenda-files)
+           (org-apple-reminders--agenda-files-with-reminder-metadata)
            (delq nil
                  (mapcar (lambda (buf)
                            (with-current-buffer buf
                              (and (buffer-file-name)
                                   (derived-mode-p 'org-mode)
-                                  (org-apple-reminders--buffer-has-reminders-p)
+                                  (org-apple-reminders--buffer-has-reminder-metadata-p)
                                   (buffer-file-name))))
                          (buffer-list))))))
 
@@ -892,23 +895,97 @@ already contains at least one REMINDER_ID (so files linked via
      ,@body))
 
 (defun org-apple-reminders--build-id-index ()
-  "Scan all known org files; return hash REMINDER_ID → expanded file path."
+  "Scan all known org files cheaply; return hash REMINDER_ID → file path."
   (let ((ht (make-hash-table :test #'equal)))
     (dolist (file (org-apple-reminders--known-files))
-      (when (file-exists-p file)
-        (with-current-buffer (find-file-noselect file)
-          (org-map-entries
-           (lambda ()
-             (when-let (id (org-entry-get nil "REMINDER_ID"))
-               (puthash id (expand-file-name file) ht)))
-           nil nil))))
+      (dolist (id (org-apple-reminders--file-reminder-ids file))
+        (puthash id (expand-file-name file) ht)))
     ht))
 
-(defun org-apple-reminders--buffer-has-reminders-p ()
-  "Return non-nil if any REMINDER_ID heading is present in this buffer."
-  (save-excursion
-    (goto-char (point-min))
-    (re-search-forward ":REMINDER_ID:" nil t)))
+(defun org-apple-reminders--agenda-files-with-reminder-metadata ()
+  "Return agenda .org files that contain reminder metadata."
+  (cl-remove-if-not
+   #'org-apple-reminders--file-has-reminder-metadata-p
+   (cl-remove-if-not
+    (lambda (file) (and (stringp file) (string-match-p "\\.org\\'" file)))
+    org-agenda-files)))
+
+(defun org-apple-reminders--file-signature (file)
+  "Return a cache signature for FILE, or nil when FILE is unavailable."
+  (when (file-readable-p file)
+    (let ((attrs (file-attributes file 'integer)))
+      (list (file-attribute-size attrs)
+            (file-attribute-modification-time attrs)))))
+
+(defun org-apple-reminders--file-reminder-metadata (file)
+  "Return reminder metadata found in FILE as (IDS . HAS-LIST)."
+  (let* ((expanded (expand-file-name file))
+         (buffer (get-file-buffer expanded)))
+    (if buffer
+        (with-current-buffer buffer
+          (org-apple-reminders--buffer-reminder-metadata))
+      (let* ((signature (org-apple-reminders--file-signature expanded))
+             (cached (and signature
+                          (gethash expanded
+                                   org-apple-reminders--file-metadata-cache))))
+        (if (and cached (equal (car cached) signature))
+            (cdr cached)
+          (let ((metadata
+                 (if signature
+                     (with-temp-buffer
+                       (insert-file-contents-literally expanded)
+                       (org-apple-reminders--buffer-reminder-metadata))
+                   (cons nil nil))))
+            (when signature
+              (puthash expanded
+                       (cons signature metadata)
+                       org-apple-reminders--file-metadata-cache))
+            metadata))))))
+
+(defun org-apple-reminders--file-reminder-ids (file)
+  "Return REMINDER_ID values found in FILE."
+  (car (org-apple-reminders--file-reminder-metadata file)))
+
+(defun org-apple-reminders--file-has-reminder-metadata-p (file)
+  "Return non-nil for FILE with reminder metadata."
+  (let ((metadata (org-apple-reminders--file-reminder-metadata file)))
+    (or (car metadata) (cdr metadata))))
+
+(defun org-apple-reminders--buffer-has-reminder-metadata-p ()
+  "Return non-nil for current buffer with reminder metadata."
+  (let ((metadata (org-apple-reminders--buffer-reminder-metadata)))
+    (or (car metadata) (cdr metadata))))
+
+(defun org-apple-reminders--buffer-reminder-metadata ()
+  "Return reminder metadata in current buffer as (IDS . HAS-LIST).
+The scan is intentionally textual and limited to property drawers so the
+background sync does not force org-element parsing across agenda files."
+  (let (ids has-list in-drawer)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((line (buffer-substring-no-properties
+                     (line-beginning-position)
+                     (line-end-position))))
+          (cond
+           ((string-match-p "^[ \t]*:PROPERTIES:[ \t]*$" line)
+            (setq in-drawer t))
+           ((and in-drawer (string-match-p "^[ \t]*:END:[ \t]*$" line))
+            (setq in-drawer nil))
+           ((and in-drawer
+                 (string-match "^[ \t]*:REMINDER_ID:[ \t]*\\(.+?\\)[ \t]*$"
+                               line))
+            (let ((id (string-trim (match-string 1 line))))
+              (unless (string= id "")
+                (push id ids))))
+           ((and in-drawer
+                 (string-match "^[ \t]*:REMINDER_LIST:[ \t]*\\(.+?\\)[ \t]*$"
+                               line))
+            (let ((list-name (string-trim (match-string 1 line))))
+              (unless (string= list-name "")
+                (setq has-list t))))))
+        (forward-line 1)))
+    (cons (nreverse ids) has-list)))
 
 (defun org-apple-reminders--register-current-file ()
   "Register the current buffer's file in `org-apple-reminders-extra-files'.
@@ -2661,9 +2738,10 @@ Run once after upgrading from a version that stored items at level 1."
   "Full bidirectional sync across all known org files ↔ Apple Reminders.
 
 Known files: `org-apple-reminders-sync-file', `org-apple-reminders-extra-files',
-and .org files in `org-agenda-files'.  See the attic implementation's docstring
-for the full per-heading conflict-resolution table; the resolution itself now
-lives in the model layer (`org-apple-reminders--conflict-direction')."
+and .org files in `org-agenda-files' that contain reminder metadata.  See the
+attic implementation's docstring for the full per-heading conflict-resolution
+table; the resolution itself now lives in the model layer
+\(`org-apple-reminders--conflict-direction')."
   (interactive)
   (message "Reminders: syncing…")
   (org-apple-reminders--with-known-files-cache
@@ -2720,7 +2798,7 @@ lives in the model layer (`org-apple-reminders--conflict-direction')."
              (derived-mode-p 'org-mode)
              (member (expand-file-name (buffer-file-name))
                      (org-apple-reminders--known-files))
-             (org-apple-reminders--buffer-has-reminders-p))
+             (org-apple-reminders--buffer-has-reminder-metadata-p))
     (let ((org-apple-reminders--syncing t)
           (buf (current-buffer)))
       (org-apple-reminders--push-to-apple)
