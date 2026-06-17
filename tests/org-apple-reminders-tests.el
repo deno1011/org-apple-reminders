@@ -329,7 +329,7 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
                          (flagged . :json-false)
                          (modDate . "2026-06-11T10:00:00Z") (list . "Work"))])))
     (org-apple-reminders-sync)
-    (should (string-match-p "DEADLINE: <2026-06-20"
+    (should (string-match-p "SCHEDULED: <2026-06-20"
                             (org-apple-reminders-test--read sync-file)))
     (should-not (cl-find :update actions :key #'car))))
 
@@ -517,12 +517,12 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
 ;;; --- Field mapping ----------------------------------------------------------
 
 (ert-deftest org-apple-reminders-test-org-item-values-maps-all-fields ()
-  "`--org-item-values' maps title, priority, flag, deadline and notes."
+  "`--org-item-values' maps title, priority, flag, scheduled date and notes."
   (with-temp-buffer
     (let ((org-todo-keywords '((sequence "TODO" "|" "DONE"))))
       (org-mode)
       (insert "* TODO [#A] Task title :flagged:\n")
-      (insert "DEADLINE: <2026-09-01 Tue 14:30>\n")
+      (insert "SCHEDULED: <2026-09-01 Tue 14:30>\n")
       (insert "the body text\n")
       (goto-char (point-min))
       (let ((vals (org-apple-reminders--org-item-values)))
@@ -533,7 +533,7 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
         (should (string-match-p "the body text" (alist-get 'notes vals)))))))
 
 (ert-deftest org-apple-reminders-test-deadline-with-time-pulled-from-apple ()
-  "A pulled Apple item with a timed due date becomes a timed org DEADLINE."
+  "A pulled Apple item with a timed due date becomes a timed org SCHEDULED."
   (org-apple-reminders-test--with-env
       "* Work\n"
       (list `((list . "Work") (listId . "list-Work")
@@ -542,7 +542,7 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
                          (flagged . :json-false)
                          (modDate . "2026-06-11T10:00:00Z") (list . "Work"))])))
     (org-apple-reminders-sync)
-    (should (string-match-p "DEADLINE: <2026-09-01[^>]*14:30"
+    (should (string-match-p "SCHEDULED: <2026-09-01[^>]*14:30"
                             (org-apple-reminders-test--read sync-file)))))
 
 (ert-deftest org-apple-reminders-test-move-reminder-between-lists-in-sync-file ()

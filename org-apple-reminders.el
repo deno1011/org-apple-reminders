@@ -4,7 +4,7 @@
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-8
-;; Version: 1.15.1
+;; Version: 1.16.0
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -513,12 +513,12 @@ Strips LOGBOOK drawers and per-line leading whitespace."
     (let* ((raw   (org-get-heading t t t t))
            (title (replace-regexp-in-string
                    "^\\(?:\\[#[ABC]\\] \\)?\\(?:★ \\)?" "" raw))
-           (dl    (org-entry-get nil "DEADLINE"))
-           (due   (when (and dl (string-match
+           (sched (org-entry-get nil "SCHEDULED"))
+           (due   (when (and sched (string-match
                                  "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)\\(?:[^0-9]*\\([0-9]\\{2\\}:[0-9]\\{2\\}\\)\\)?"
-                                 dl))
-                    (let ((date (match-string 1 dl))
-                          (time (match-string 2 dl)))
+                                 sched))
+                    (let ((date (match-string 1 sched))
+                          (time (match-string 2 sched)))
                       (if time (concat date "T" time) date))))
            (prio-char (nth 3 (org-heading-components)))
            (prio  (cond ((eql prio-char ?A) 1)
@@ -535,7 +535,9 @@ Strips LOGBOOK drawers and per-line leading whitespace."
   (cond ((eql p 1) "[#A] ") ((eql p 5) "[#B] ") ((eql p 9) "[#C] ") (t "")))
 
 (defun org-apple-reminders--format-due (due)
-  "Format DUE string (YYYY-MM-DD or YYYY-MM-DDTHH:MM) as an org deadline timestamp."
+  "Format DUE as an org SCHEDULED timestamp.
+DUE is YYYY-MM-DD or YYYY-MM-DDTHH:MM.  Apple's single due date maps to
+org SCHEDULED (appears on the day, like Apple's Today view), not DEADLINE."
   (let* ((has-time (string-match "T\\([0-9]\\{2\\}:[0-9]\\{2\\}\\)" due))
          (time-str (when has-time (match-string 1 due)))
          (date-str (substring due 0 10))
@@ -612,11 +614,13 @@ explicitly allow reminder creation."
     (?C 9)
     (_ 0)))
 
-(defun org-apple-reminders--org-deadline-value ()
-  "Return the date portion of the org DEADLINE at point, or nil."
-  (when-let ((deadline (org-entry-get nil "DEADLINE")))
-    (when (string-match "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" deadline)
-      (match-string 1 deadline))))
+(defun org-apple-reminders--org-scheduled-value ()
+  "Return the date portion of the org SCHEDULED at point, or nil.
+SCHEDULED is the field that maps to Apple's due date (see
+`org-apple-reminders--format-due')."
+  (when-let ((scheduled (org-entry-get nil "SCHEDULED")))
+    (when (string-match "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" scheduled)
+      (match-string 1 scheduled))))
 
 (defun org-apple-reminders--org-title-value ()
   "Return the reminder title represented by the org heading at point."
@@ -629,7 +633,7 @@ explicitly allow reminder creation."
 (defun org-apple-reminders--current-org-field-values ()
   "Return tracked org field values for the heading at point."
   `((title . ,(org-apple-reminders--org-title-value))
-    (due . ,(org-apple-reminders--org-deadline-value))
+    (due . ,(org-apple-reminders--org-scheduled-value))
     (priority . ,(org-apple-reminders--org-priority-value))
     (flagged . ,(org-apple-reminders--org-flagged-p))
     (notes . ,(org-apple-reminders--extract-notes))))
@@ -710,9 +714,9 @@ are allowed to overwrite Apple; title and flagged state still remain explicit."
                           (t 'remove))))
     (unless (equal apple-due (alist-get 'due org-values))
       (if apple-due
-          (org-add-planning-info 'deadline
+          (org-add-planning-info 'scheduled
                                  (org-apple-reminders--format-due apple-due))
-        (org-add-planning-info nil nil 'deadline)))
+        (org-add-planning-info nil nil 'scheduled)))
     (unless (eq apple-flag (alist-get 'flagged org-values))
       (org-toggle-tag "flagged" (if apple-flag 'on 'off)))
     (unless (equal apple-notes (alist-get 'notes org-values))
@@ -728,7 +732,7 @@ Return non-nil when the org heading was changed."
     (when (and (alist-get 'due apple-values)
                (null (alist-get 'due org-values)))
       (org-add-planning-info
-       'deadline
+       'scheduled
        (org-apple-reminders--format-due (alist-get 'due apple-values)))
       (setq changed t))
     (when (and (org-apple-reminders--nonempty-string
@@ -1347,7 +1351,7 @@ that track changed positions can reveal it."
                     (if (eq flagged t) "★ " "")
                     title))
     (when (and due (not (eq due :null)))
-      (insert (format "   DEADLINE: %s\n" (org-apple-reminders--format-due due))))
+      (insert (format "   SCHEDULED: %s\n" (org-apple-reminders--format-due due))))
     (insert "   :PROPERTIES:\n")
     (insert (format "   :REMINDER_ID:   %s\n" id))
     (insert (format "   :REMINDER_LIST: %s\n" list-name))
@@ -2048,7 +2052,7 @@ Tally updates into COUNTS."
                                 (if (eq flagged t) "★ " "")
                                 title))
                 (when (and due (not (eq due :null)))
-                  (insert (format "  DEADLINE: <%s>\n" due)))
+                  (insert (format "  SCHEDULED: <%s>\n" due)))
                 (insert (format "  :PROPERTIES:\n  :REMINDER_LIST: %s\n  :REMINDER_ID: %s\n  :END:\n"
                                 lname id)))))))
       (add-to-list 'org-agenda-files file))))
@@ -2315,7 +2319,7 @@ safe to bind globally.")
       (error (message "org-apple-reminders push: %s" (error-message-string err))))))
 
 (advice-add 'org-priority         :after #'org-apple-reminders--maybe-push-heading)
-(advice-add 'org-deadline         :after #'org-apple-reminders--maybe-push-heading)
+(advice-add 'org-schedule         :after #'org-apple-reminders--maybe-push-heading)
 (advice-add 'org-set-tags-command :after #'org-apple-reminders--maybe-push-heading)
 
 (defun org-apple-reminders-show-lists ()
@@ -2691,7 +2695,7 @@ on the heading at point)."
           (when (buffer-file-name) (save-buffer)))
         (message "Removed from Apple, kept in org: %s" title)))))
 
-;;; Live hooks: TODO state, priority, deadline, tags
+;;; Live hooks: TODO state, priority, scheduled, tags
 
 (defun org-apple-reminders-migrate-flat-headings ()
   "One-time migration: move flat * TODO reminder entries under * ListName headings.
