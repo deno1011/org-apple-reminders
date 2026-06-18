@@ -458,7 +458,7 @@ Before each `save-buffer`, `org-map-entries` runs over all level-1 headings (lis
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
 ## Author
 
