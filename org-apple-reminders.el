@@ -4,7 +4,7 @@
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-8
-;; Version: 1.16.0
+;; Version: 1.17.0
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -404,6 +404,71 @@ try{lid=String(l.id());}catch(e){}
 JSON.stringify({ok:true,list:name,listId:lid});"
            (json-encode list-name))
    :object-type 'alist :null-object nil))
+
+;;; --- Provisioning API: lists + native recurring reminders ---------------
+;; For install-time setup so a fresh user gets the GTD lists + ritual
+;; reminders without knowing they exist.  Recurrence is create-only and
+;; *native* (Apple owns it); the sync never round-trips it (org repeater ↔
+;; RRULE is lossy).  Put recurring reminders in a list outside the synced set.
+
+(defconst org-apple-reminders--ensure-recurring-template
+  "ObjC.import('EventKit');
+var store=$.EKEventStore.alloc.init;
+var cals=store.calendarsForEntityType($.EKEntityTypeReminder);
+var target=null;
+for(var i=0;i<cals.count;i++){var c=cals.objectAtIndex(i);if(ObjC.unwrap(c.title)===%s){target=c;break;}}
+var out={};
+if(!target){out.err='list not found';}
+else{
+ var done=false,exists=false;
+ var pred=store.predicateForRemindersInCalendars($([target]));
+ store.fetchRemindersMatchingPredicateCompletion(pred,function(rems){
+  if(rems){for(var j=0;j<rems.count;j++){if(ObjC.unwrap(rems.objectAtIndex(j).title)===%s){exists=true;break;}}}
+  done=true;});
+ var it=0;while(!done&&it<60){$.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));it++;}
+ if(exists){out.exists=true;}
+ else{try{
+  var r=$.EKReminder.reminderWithEventStore(store);
+  r.title=%s;r.calendar=target;
+  var comps=$.NSDateComponents.alloc.init;
+  comps.year=%d;comps.month=%d;comps.day=%d;comps.hour=%d;comps.minute=%d;
+  r.dueDateComponents=comps;
+  r.addAlarm($.EKAlarm.alarmWithRelativeOffset(0));
+  r.addRecurrenceRule($.EKRecurrenceRule.alloc.initRecurrenceWithFrequencyIntervalEnd(%d,1,$()));
+  var err=Ref();
+  out.ok=store.saveReminderCommitError(r,true,err);
+  out.id=ObjC.unwrap(r.calendarItemIdentifier);
+ }catch(e){out.err=String(e);}}
+}
+JSON.stringify(out);"
+  "EventKit-via-JXA template: idempotently create a native recurring reminder.
+Self-checks via an EventKit fetch (same store as the create, so no
+cross-mechanism visibility lag).  Placeholders in order: list name (JSON),
+title-for-check (JSON), title-for-create (JSON), year, month, day, hour,
+minute, EKRecurrenceFrequency int (0=daily 1=weekly 2=monthly).")
+
+(defun org-apple-reminders-ensure-list (name)
+  "Ensure an Apple Reminders list NAME exists, creating it if absent.
+Public, idempotent.  Returns the list metadata alist."
+  (org-apple-reminders--ensure-list name))
+
+(defun org-apple-reminders-ensure-recurring (list-name title freq first-due)
+  "Ensure a native recurring reminder TITLE exists in LIST-NAME.
+FREQ is `daily', `weekly', or `monthly'.  FIRST-DUE is an Emacs time value
+for the first occurrence; its day-of-week / day-of-month and time anchor the
+recurrence.  Idempotent (the EventKit template self-checks): returns an alist
+with `exists' t when a reminder named TITLE was already present, else `ok'/`id'.
+
+Create-only by design — the reminder is native (Apple owns the recurrence)
+and `org-apple-reminders-sync' never touches it.  Put such reminders in a
+list outside the synced set."
+  (let ((d (decode-time first-due))
+        (f (pcase freq ('daily 0) ('weekly 1) ('monthly 2) (_ 0))))
+    (org-apple-reminders--jxa-run-json
+     (format org-apple-reminders--ensure-recurring-template
+             (json-encode list-name) (json-encode title) (json-encode title)
+             (nth 5 d) (nth 4 d) (nth 3 d) (nth 2 d) (nth 1 d) f)
+     :object-type 'alist :null-object nil)))
 
 (defun org-apple-reminders-lists ()
   "Return a list of Apple Reminders list names."
