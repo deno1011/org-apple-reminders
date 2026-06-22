@@ -659,6 +659,21 @@ stamps REMINDER_APPLE_MOD."
   "The file must (provide 'org-apple-reminders) so require / use-package work."
   (should (featurep 'org-apple-reminders)))
 
+(ert-deftest org-apple-reminders-test-normalize-due ()
+  "`--normalize-due' accepts strings, org timestamps, epochs, times; nil passes."
+  (should (null (org-apple-reminders--normalize-due nil)))
+  (should (equal "2026-06-25" (org-apple-reminders--normalize-due "2026-06-25")))
+  (should (equal "2026-06-25T09:30"
+                 (org-apple-reminders--normalize-due "2026-06-25T09:30")))
+  (should (equal "2026-06-25T09:30"
+                 (org-apple-reminders--normalize-due "<2026-06-25 Thu 09:30>")))
+  (should (equal "2026-06-25"
+                 (org-apple-reminders--normalize-due "<2026-06-25 Thu>")))
+  (should (equal "2026-06-25"
+                 (org-apple-reminders--normalize-due
+                  (encode-time 0 0 12 25 6 2026))))
+  (should-error (org-apple-reminders--normalize-due "not a date")))
+
 (ert-deftest org-apple-reminders-test-checkdoc-baseline ()
   "Hold checkdoc to its accepted baseline so new nits fail the suite.
 The 9 long-standing \"within reason\" findings are:

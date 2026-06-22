@@ -4,7 +4,7 @@
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-8
-;; Version: 1.18.0
+;; Version: 1.19.0
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -476,6 +476,57 @@ reminder already existed."
                (json-encode list-name) (json-encode title)
                (nth 5 d) (nth 4 d) (nth 3 d) (nth 2 d) (nth 1 d) f)
        :object-type 'alist :null-object nil))))
+
+(defun org-apple-reminders--normalize-due (due)
+  "Normalize DUE to a \"YYYY-MM-DD[THH:MM]\" string for `--due-date->js', or nil.
+DUE may be nil, an ISO date/time string, an org active timestamp such as
+\"<2026-06-25 Wed 09:30>\", an epoch number, or an Emacs time value."
+  (cond
+   ((null due) nil)
+   ((stringp due)
+    (let ((s (string-trim due)))
+      (if (string-match
+           "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)\\(?:[^0-9]+\\([0-9]\\{2\\}:[0-9]\\{2\\}\\)\\)?"
+           s)
+          (concat (match-string 1 s)
+                  (if (match-string 2 s) (concat "T" (match-string 2 s)) ""))
+        (user-error "Unparseable due date: %s" due))))
+   ((numberp due) (format-time-string "%Y-%m-%d" (seconds-to-time due)))
+   (t (format-time-string "%Y-%m-%d" due))))
+
+(defun org-apple-reminders-create-task
+    (title &optional list due notes priority flagged pull)
+  "Create a dated task in Apple Reminders (provider API; non-interactive).
+TITLE is the reminder title.  LIST is the Apple list name (default the
+configured/auto-detected default list); it is created if absent.  DUE is the
+org SCHEDULED date — a string, an org timestamp, an epoch, or an Emacs time
+value — mapped to the Apple due date, or nil.  NOTES, PRIORITY (0-9) and
+FLAGGED are optional reminder fields.  When PULL is non-nil, run
+`org-apple-reminders-sync' afterwards so the new task is mirrored into org.
+
+This is the dated-task counterpart of
+`org-apple-calendar-create-appointment' and the entry point a non-interactive
+caller (e.g. a chat agent) uses to add a task.  Returns a plist:
+  (:id ID :list LIST :title TITLE :due DUE-STRING :pulled BOOL)
+and signals on failure."
+  (let* ((title (string-trim (or title "")))
+         (list (or list (org-apple-reminders--default-list)))
+         (due (org-apple-reminders--normalize-due due)))
+    (when (string-empty-p title)
+      (user-error "Task title must not be empty"))
+    (unless list
+      (user-error "No Apple Reminders list available"))
+    (org-apple-reminders--ensure-list list)
+    (let ((id (org-apple-reminders--create-in-apple
+               list (list (cons 'title title)
+                          (cons 'notes (or notes ""))
+                          (cons 'priority (or priority 0))
+                          (cons 'flagged flagged)
+                          (cons 'due due)))))
+      (unless id
+        (user-error "Create task failed in list %s" list))
+      (when pull (ignore-errors (org-apple-reminders-sync)))
+      (list :id id :list list :title title :due due :pulled (and pull t)))))
 
 (defun org-apple-reminders-lists ()
   "Return a list of Apple Reminders list names."
