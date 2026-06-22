@@ -4,7 +4,7 @@
 
 ;; Author: Denis Butic <d.e.n.o@gmx.net>
 ;; Assisted-by: Claude:claude-opus-4-8
-;; Version: 1.17.0
+;; Version: 1.18.0
 ;; Package-Requires: ((emacs "27.1") (org "9.3"))
 ;; Keywords: org, outlines, apple, reminders, tools, macos
 ;; URL: https://github.com/deno1011/org-apple-reminders
@@ -112,6 +112,20 @@ Do not edit by hand — use `org-apple-reminders-set-included-lists'."
   :type '(choice (const :tag "Never saved" unset)
                  (const :tag "All lists" nil)
                  (repeat :tag "Specific lists" string))
+  :group 'org-apple-reminders)
+
+(defcustom org-apple-reminders-excluded-lists nil
+  "Apple Reminders lists that must NEVER participate in sync.
+A list of list-name strings.  Exclusion takes priority over
+`org-apple-reminders-included-lists': an excluded list is skipped by every
+sync phase (pull, push, prune) regardless of the included-lists setting.
+
+Use this for lists managed natively that the sync must not touch — e.g. a
+list of NATIVE RECURRING reminders, which the sync cannot round-trip (an org
+repeater <-> EKRecurrenceRule mapping is lossy) and would otherwise mangle or
+delete.  Unlike included-lists (which only filters NEW pulls), exclusion also
+keeps the sync from updating or deleting anything already in the list."
+  :type '(repeat string)
   :group 'org-apple-reminders)
 
 (defcustom org-apple-reminders-extra-files nil
@@ -505,9 +519,12 @@ lists are included."
 
 (defun org-apple-reminders--list-included-p (list-name)
   "Return non-nil if LIST-NAME should participate in sync.
-Always true when the effective included-lists value is nil."
-  (let ((lists (org-apple-reminders--effective-included-lists)))
-    (or (null lists) (member list-name lists))))
+An excluded list (`org-apple-reminders-excluded-lists') is never included,
+regardless of included-lists.  Otherwise: always true when the effective
+included-lists value is nil, else true only for member lists."
+  (and (not (member list-name org-apple-reminders-excluded-lists))
+       (let ((lists (org-apple-reminders--effective-included-lists)))
+         (or (null lists) (member list-name lists)))))
 
 ;; -- list-name model --
 
