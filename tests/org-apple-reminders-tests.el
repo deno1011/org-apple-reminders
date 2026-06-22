@@ -126,6 +126,30 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
                            :key (lambda (action) (nth 2 action))
                            :test #'equal)))))
 
+(ert-deftest org-apple-reminders-test-nested-list-container-is-not-reminder ()
+  "A malformed nested list container must not be pushed as a reminder."
+  (org-apple-reminders-test--with-env
+      "* Einkaufsliste [0/0]\n:PROPERTIES:\n:REMINDER_LIST_NAME: Einkaufsliste\n:REMINDER_LIST_SYNCED: t\n:REMINDER_LIST_ID: list-groceries\n:END:\n** Einkaufsliste [0/0]\n:PROPERTIES:\n:REMINDER_LIST_NAME: Einkaufsliste\n:REMINDER_LIST_SYNCED: t\n:REMINDER_LIST_ID: list-groceries\n:REMINDER_LIST: Einkaufsliste\n:END:\n** TODO babyspinat\n"
+      (list (org-apple-reminders-test--list "Einkaufsliste"))
+    (org-apple-reminders-sync)
+    (let ((text (org-apple-reminders-test--read sync-file)))
+      (should (= 1 (cl-count-if (lambda (a) (eq (car a) :create)) actions)))
+      (should (member '(:create "Einkaufsliste" "babyspinat" "created-1")
+                      actions))
+      (should-not (cl-find "Einkaufsliste [0/0]"
+                           actions
+                           :key (lambda (action) (nth 2 action))
+                           :test #'equal))
+      (with-temp-buffer
+        (insert text)
+        (goto-char (point-min))
+        (re-search-forward "^\\*\\* Einkaufsliste \\[0/0\\]")
+        (let ((container-end (save-excursion
+                               (outline-next-heading)
+                               (point))))
+          (should-not (save-excursion
+                        (re-search-forward ":REMINDER_ID:" container-end t))))))))
+
 (ert-deftest org-apple-reminders-test-extra-file-is-update-only-with-explicit-list ()
   (org-apple-reminders-test--with-env
       "* Work\n"
@@ -155,6 +179,25 @@ Within BODY, `sync-file', `extra-file' and `actions' are bound."
     (let ((sync-text (org-apple-reminders-test--read sync-file)))
       (should-not (string-match-p "Linked in ordinary" sync-text)))
     (should-not (cl-find :create actions :key #'car))))
+
+(ert-deftest org-apple-reminders-test-sync-moves-linked-item-when-apple-list-differs ()
+  "A full sync propagates local list moves for already-linked reminders."
+  (org-apple-reminders-test--with-env
+      "* Inbox\n* Einkaufsliste\n** TODO babyspinat\n:PROPERTIES:\n:REMINDER_ID: old-spinach\n:REMINDER_LIST: Einkaufsliste\n:END:\n"
+      (list (org-apple-reminders-test--list
+             "Inbox"
+             (org-apple-reminders-test--item "old-spinach" "babyspinat" nil "Inbox"))
+            (org-apple-reminders-test--list "Einkaufsliste"))
+    (org-apple-reminders-sync)
+    (let ((text (org-apple-reminders-test--read sync-file)))
+      (should (member '(:ensure-list "Einkaufsliste") actions))
+      (should (member '(:create "Einkaufsliste" "babyspinat" "created-1") actions))
+      (should (member '(:delete "Inbox" "old-spinach") actions))
+      (should-not (string-match-p ":REMINDER_ID:[ \t]+old-spinach" text))
+      (should (string-match-p ":REMINDER_ID:[ \t]+created-1" text))
+      (with-temp-buffer
+        (insert text)
+        (should (= 1 (how-many "^\\*\\* TODO babyspinat" (point-min) (point-max))))))))
 
 (ert-deftest org-apple-reminders-test-open-apple-item-missing-from-ordinary-file-reappears-in-sync-file ()
   (org-apple-reminders-test--with-env
